@@ -9,9 +9,6 @@ skills/ci-runner-audit/scripts/scan_ci_runners.py all --repo-file /tmp/repos.txt
 
 Scope: two explicit repositories, default branches only.
 
-Exit status: 0.
-Summary: `scan_complete=true`, `workflows_scanned=3`, `scan_errors=0`.
-
 `example-project-retired-gh-runners-confirmed.tsv`:
 
 ```tsv
@@ -27,3 +24,5 @@ apache/example  .github/workflows/build.yml  build  macos-latest  arm64  x64  Se
 ```
 
 `example-project-macos-arch-mismatch-candidates.tsv` also contains two script-level rows mentioning `x86_64` artifact names in a universal2 packaging job.
+
+Exit status: 0. Summary: `scan_complete=true`, `workflows_scanned=3`, `scan_errors=0`.

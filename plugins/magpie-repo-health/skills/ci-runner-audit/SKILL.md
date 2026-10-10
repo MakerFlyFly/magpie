@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 3040
+measured_tokens: 2474
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -153,13 +153,9 @@ asks for branch-specific analysis.
 
 ## Commands
 
+The system Python must be 3.11 or newer and have PyYAML installed (`python3 -m pip install pyyaml`).
+
 Run from the framework checkout root.
-Requires Python 3.11+, PyYAML (`python3 -m pip install pyyaml` or the system's `python3-yaml` package), and `gh` authenticated to `github.com`.
-The script checks dependencies and the active authentication before enumerating repositories.
-`--gh-auth-timeout` (default `30`), `--gh-api-timeout` (default `60`), and `--gh-pagination-timeout` (default `300`) set positive integer seconds per authentication command, metadata/directory command, and complete repository-pagination command respectively.
-These are per-command budgets, not a deadline for the whole audit.
-Authentication timeouts fail prerequisites; repository-pagination timeouts stop org discovery; local metadata, directory and GraphQL batch timeouts preserve other successful results.
-A timeout never triggers an authentication compatibility retry or accepts partial stdout as a successful response.
 
 For one repository:
 
@@ -198,17 +194,17 @@ skills/ci-runner-audit/scripts/scan_ci_runners.py all \
 
 For only one check, replace `all` with `retired` or `macos-arch`.
 
-`--repo-file` requires UTF-8 text with an optional BOM, with one `owner/repo` per line; blank lines and `#` comments are ignored.
-
 Use `--refresh` for org scans when cached repo/workflow inventory may be
 stale. Explicit `--repo` and `--repo-file` scans fetch repository
 metadata directly.
 
-Compatibility and inventory details: [scanner README](scripts/README.md).
-
 ---
 
 ## Outputs
+
+`<scope>-scan-errors.tsv` records failures with `repo`, `path`, `stage`, `error`, and `html_url`.
+The stderr summary includes `scan_complete`, `workflows_scanned` (files completing all selected checks), and `scan_errors`.
+Exit codes are `0` for complete, `1` for incomplete scanning/cache/output, and `2` for unavailable prerequisites or unreadable input.
 
 The script writes TSV files under `--out-dir`:
 
@@ -218,14 +214,6 @@ The script writes TSV files under `--out-dir`:
   setup-action architecture mismatches.
 - `<scope>-macos-arch-mismatch-candidates.tsv` — broad script/action
   architecture candidates for human review. Expect false positives.
-- `<scope>-scan-errors.tsv` — failures with `repo`, `path`, `stage`, `error`, and `html_url` context; header-only when there are no errors.
-
-The script keeps successful findings when an individual repository, workflow-list entry, workflow, or selected check fails.
-In `all` mode, a failed check reports stage `check` and its check name while retaining the other check's findings.
-It prints `scan_complete`, `workflows_scanned`, and `scan_errors` to stderr; `workflows_scanned` counts files that completed every requested check.
-Completion includes output and cache publication, so a cache failure still makes the invocation incomplete even when every enumerated file was checked.
-Exit status is `0` for a complete scan, `1` for an incomplete scan or output failure, and `2` for unavailable prerequisites or invalid arguments.
-Global prerequisite failures and failed org discovery terminate immediately; local failures are collected while the remaining work continues.
 
 Use `--scope-name` for stable output names for project or repo-set
 scans.
@@ -254,27 +242,18 @@ Before reporting a broad candidate as actionable, inspect `runs-on`,
 
 ## Reporting
 
+Check exit status and completion/error counts before interpreting findings. A failed or incomplete scan must be reported as incomplete, even with empty findings; keep successful findings qualified as partial results.
+A clean result requires successful completion, zero scan errors and zero findings. Prerequisite failures stop before checking workflows; older findings files are not results of that invocation.
+
 Report findings in this order:
 
 1. Scope scanned: owner/repo set, default branches, and number of
-   workflow files from `workflows_scanned` if available.
+   workflow files if known.
 2. Command used and whether cache was refreshed.
 3. High-confidence retired runner and setup-action mismatch findings.
 4. Broad candidates, clearly marked as false-positive-prone triage
    input.
 5. Links from the TSV `html_url` column.
-
-Check the command's exit status, `scan_complete`, and `scan_errors` before interpreting the findings.
-If the exit status is non-zero, `scan_complete=false`, or `scan_errors>0`, report the audit as incomplete, include the failure count and available error context, and identify successful findings as partial results.
-When all errors are at stage `cache`, state that every enumerated workflow was checked and the invocation is incomplete because cache persistence failed.
-For organization discovery, report canonical names for same-owner renames; identify cross-owner transfers and conflicting alias inventories as scope failures, with successful findings retained as partial results.
-Findings checked from the first valid inventory remain reportable when a conflicting alias is rejected; the scope failure does not invalidate those successful checks.
-Report rate-limited batches and unqueried repositories as incomplete, including a limit in the final batch. Discovery progress counts attempted batches, not checked workflows or complete coverage.
-State whether refresh was requested and whether a valid saved inventory was reused. A failed refresh reports its partial discovery separately from cache publication; a reused valid inventory represents its saved scope.
-Never describe an incomplete audit as clean or claim the scope has no issues, even when its findings TSVs are empty.
-Report a clean scan only when the command succeeded, `scan_complete=true`, `scan_errors=0`, and there are no findings.
-When completion evidence is missing, state that completeness is unknown.
-If a global prerequisite (including invalid repo-file encoding) or org discovery failure stopped the run before workflow checks, existing findings files in the output directory are not results of the failed invocation.
 
 Use conservative language: these findings are CI breakage or
 portability risks, not security vulnerabilities.

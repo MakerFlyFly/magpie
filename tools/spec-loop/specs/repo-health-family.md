@@ -99,21 +99,9 @@ grouped, prioritised report → wait for confirmation before any write.
   freshness, license compliance, test stability). Skills do not share
   intermediate state, so each runs independently.
 - **A failed scan is never a clean result.**
-  `ci-runner-audit` preserves successful repository, workflow and per-check findings and reports discovery, cache, download, parse, and check failures in a scan-errors TSV.
-  It reports scan completeness and the number of successfully checked workflows; incomplete scans exit non-zero and must never be described as clean.
-  Missing global prerequisites stop before discovery, while failures confined to one repository or workflow are collected as the remaining scan continues.
-  Repository v2 and workflow v3 inventories are cached atomically only after complete, valid enumeration; older unverified inventories are rebuilt automatically.
-  Cache persistence failures keep in-memory results usable while the scan reports incomplete.
-  REST and batched GraphQL discovery require explicit evidence for empty repositories or absent workflow directories; malformed metadata, invalid refs and unexplained nulls are errors.
-  Organization enumeration accepts same-owner canonical renames, excludes cross-owner transfers, and deduplicates aliases and case-sensitive paths; conflicting branch/Commit inventories retain the first inventory and report incomplete coverage.
-  Valid workflow-cache hits keep their saved scope without current-owner probes; manual refresh updates repository membership and workflow inventory.
-  Structured partial responses preserve valid repositories and entries, but HTTP failures and final-batch rate limits remain errors. Limits stop later requests and identify unqueried repositories without automatic retry or REST fallback.
-  Only regular YAML workflow files are scanned; download and evidence URLs retain default-branch semantics. Progress reports attempted discovery batches separately from checked-file and completion counts.
-  UTF-8 responses, optional-BOM repository inputs, original diagnostics and structured encoding/stream failures preserve consistent scope prefixes; invalid inputs and unavailable prerequisites stop before scanning with exit `2` and an error TSV.
-  Authentication compatibility falls back only for an explicitly unsupported active-account flag. Phase deadlines produce structured errors; global discovery failures stop enumeration, while local failures retain other results. Timeout stdout cannot become successful data.
-  Only actual download 404s from reused valid workflow inventories suggest refresh. Cache-only failures state that all enumerated workflows were checked while persistence made the invocation incomplete.
-  Static runner checks avoid unused matrix expansion while preserving strategy validation and runner classification. Provider details, cache formats and command budgets live in the [scanner README](../../../plugins/magpie-repo-health/skills/ci-runner-audit/scripts/README.md).
-  `workflow-security-audit`
+  `ci-runner-audit` preserves successful findings, exposes fetch/parse/discovery failures and reports completion with non-zero status for incomplete audits.
+  Missing prerequisites stop before discovery. Only fully validated inventories are atomically cached; legacy untrusted inventories are rebuilt, and cache failures retain usable in-memory results.
+ `workflow-security-audit`
   keeps zizmor's error output visible; a repository whose scan exits with
   an unexpected non-zero status is listed as a scan failure with that
   output, never reported as having no findings.
