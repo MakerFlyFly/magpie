@@ -31,7 +31,7 @@ import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import urlopen
@@ -397,7 +397,7 @@ def workflow_query(repos: list[dict]) -> str:
     return "query { " + " ".join(selections) + " }"
 
 
-def valid_graphql_response(response: object, *, partial: bool = False) -> TypeGuard[dict]:
+def valid_graphql_response(response: object, *, partial: bool = False) -> bool:
     if not isinstance(response, dict) or "data" not in response:
         return False
     errors = response.get("errors", [])
@@ -430,6 +430,7 @@ def graphql_response(query: str, api_timeout: int) -> tuple[dict, GhError | None
         response = json.loads(output)
     if not valid_graphql_response(response):
         raise ScanError("Unexpected GraphQL response: expected data and an optional errors list")
+    assert isinstance(response, dict)
     return response, failure
 
 
