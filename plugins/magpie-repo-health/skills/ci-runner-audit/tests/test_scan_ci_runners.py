@@ -139,7 +139,7 @@ class ScanTest(unittest.TestCase):
         original = self.gh.side_effect
 
         def routed(args, **kwargs):
-            request = self.gh_request(args)
+            request = self.validated_gh_request(args)
             if request.kind == kind:
                 return override(args, **kwargs)
             return original(args, **kwargs)
@@ -210,7 +210,7 @@ class ScanTest(unittest.TestCase):
         output = json.dumps({"data": data, "errors": errors}, ensure_ascii=False)
         return self.completed(args, int(bool(errors)), output, "gh: GraphQL field errors" if errors else "")
 
-    def gh_run(self, args, **kwargs):
+    def validated_gh_request(self, args):
         try:
             request = self.gh_request(args)
         except (AssertionError, StopIteration, ValueError):
@@ -219,6 +219,10 @@ class ScanTest(unittest.TestCase):
         if request.kind == "unknown":
             self.unexpected_calls.append(args)
             raise AssertionError(f"Unrecognized gh route: {args}")
+        return request
+
+    def gh_run(self, args, **kwargs):
+        request = self.validated_gh_request(args)
         if args[1:3] == ["auth", "status"]:
             return self.completed(args, int(self.auth_failure), "", "authentication unavailable")
         endpoint = request.endpoint
@@ -1771,6 +1775,15 @@ class ScanTest(unittest.TestCase):
             self.gh_run(["gh", "api", "unsupported-endpoint"])
         self.assertEqual(self.unexpected_calls, [["gh", "api", "unsupported-endpoint"]])
         self.unexpected_calls.clear()  # This case deliberately asserted the recorded routing violation.
+
+    def test_override_routes_cannot_hide_unknown_requests(self) -> None:
+        self.override_graphql(self.graphql_payload())
+        requests = [["gh", "api", "unsupported-endpoint"], ["gh", "api", "--unsupported", "graphql"]]
+        for args in requests:
+            with self.subTest(args=args), self.assertRaises(AssertionError):
+                scan.run(args)
+        self.assertEqual(self.unexpected_calls, requests)
+        self.unexpected_calls.clear()  # Deliberate violations were asserted above.
 
     def test_rest_empty_repository_is_still_verified_by_409(self) -> None:
         self.list_failures = {"example/retired": 404}
