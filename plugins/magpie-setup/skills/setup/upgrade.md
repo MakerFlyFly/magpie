@@ -582,6 +582,15 @@ rather than pulls in via symlink. Examples:
 - An installed Gemini workspace profile and guard registration:
   follow [the Gemini update lifecycle](../../../../docs/adapters/gemini.md#update) to report drift, then use its install merge for approved repairs.
   Preserve unrelated configuration and hand edits, and verify after restarting the runtime.
+- Grok action-guard wiring, when Grok is an adopted runtime.
+  For a marketplace/plugin install, leave repository hook state alone and let the plugin manager update the bundled `magpie-agent-guard` executable and hook.
+  Do not create a project hook or snapshot merely because the plugin was upgraded.
+  For a source or pinned-snapshot install, compare only `<repo-root>/.grok/hooks/magpie-agent-guard.json` with the current expected hook shape.
+  Preserve every other `.grok/hooks/*` entry and never modify `.grok/config.toml`.
+  If the Magpie hook is stock-but-stale, refresh it.
+  If it appears hand-edited, surface the diff and ask before replacing it.
+  Do not grant or reset Grok project-hook trust during upgrade.
+  Trust remains an explicit operator decision.
 - Any future hook or local config the framework adds.
 
 These can drift independently of the snapshot — an

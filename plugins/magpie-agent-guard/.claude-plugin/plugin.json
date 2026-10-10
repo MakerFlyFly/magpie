@@ -8,19 +8,5 @@
   },
   "homepage": "https://magpie.apache.org/",
   "repository": "https://github.com/apache/magpie",
-  "license": "Apache-2.0",
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/tools/agent-guard/src/agent_guard/__init__.py\"",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
-  }
+  "license": "Apache-2.0"
 }

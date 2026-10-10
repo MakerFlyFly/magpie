@@ -30,6 +30,9 @@ pre-tool hook to/from the core, so every wired harness enforces one rule set:
   non-zero exit so the plugin can throw and abort the tool call.
 * :func:`gemini_main` — Gemini CLI ``BeforeTool`` hook (``--gemini``):
   matches ``run_shell_command`` and blocks with exit 2 and a stderr reason.
+* :func:`grok_main` — Grok Build ``PreToolUse`` adapter (``--grok`` or
+  automatic no-argument payload-shape detection): reads the documented
+  camelCase event and emits Grok's JSON allow/deny decision.
 * :func:`check_main` — Harness-neutral check-only entry point (``--check``):
   takes the command as remaining CLI args, exits ``DENY_EXIT`` with the reason
   on stdout on a deny, ``ALLOW_EXIT`` silently on allow, ``USAGE_EXIT`` when no
@@ -1322,20 +1325,28 @@ def _emit_deny(reason: str) -> None:
     sys.stdout.write("\n")
 
 
-def main() -> int:
-    """Claude Code ``PreToolUse`` entry point (the default invocation)."""
-    try:
-        event = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        return 0  # Malformed event — never break the user's shell; allow.
+def _claude_event(event: object) -> int:
+    """Handle one parsed Claude Code ``PreToolUse`` event."""
     if not isinstance(event, dict) or event.get("tool_name") != "Bash":
-        return 0
-    command = str(event.get("tool_input", {}).get("command", ""))
+        return ALLOW_EXIT
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return ALLOW_EXIT
+    command = str(tool_input.get("command", ""))
     cwd = event.get("cwd")
     reason = dispatch(command, cwd if isinstance(cwd, str) else None)
     if reason:
         _emit_deny(reason)
-    return 0
+    return ALLOW_EXIT
+
+
+def main() -> int:
+    """Claude Code ``PreToolUse`` entry point."""
+    try:
+        event = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return ALLOW_EXIT
+    return _claude_event(event)
 
 
 # Exit codes for the harness-neutral entry point (``--opencode`` and any future
@@ -1557,6 +1568,45 @@ def copilot_main() -> int:
     return ALLOW_EXIT
 
 
+def _grok_event(event: object) -> int:
+    """Handle one parsed Grok Build ``PreToolUse`` event."""
+    if not isinstance(event, dict):
+        return ALLOW_EXIT
+    if event.get("toolName") != "run_terminal_command":
+        return ALLOW_EXIT
+    tool_input = event.get("toolInput")
+    if not isinstance(tool_input, dict):
+        return ALLOW_EXIT
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return ALLOW_EXIT
+
+    cwd = event.get("cwd")
+    reason = dispatch(command, cwd if isinstance(cwd, str) else None)
+    if reason:
+        json.dump({"decision": "deny", "reason": reason}, sys.stdout)
+        sys.stdout.write("\n")
+        return DENY_EXIT
+
+    return ALLOW_EXIT
+
+
+def grok_main() -> int:
+    """Translate Grok Build ``PreToolUse`` input to the shared guard core.
+
+    Verified with Grok Build 1.0.46 (2765805b9442). ``PreToolUse`` supplies
+    camelCase ``toolName`` / ``toolInput`` fields; the captured shell event uses
+    ``run_terminal_command`` and carries the command in ``toolInput.command``.
+    Relevant calls emit Grok's explicit JSON decision. Malformed or unrelated
+    events stay silent and fail open inside the adapter.
+    """
+    try:
+        event = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return ALLOW_EXIT
+    return _grok_event(event)
+
+
 def check_main(argv: list[str]) -> int:
     """Harness-neutral check-only entry point (``--check``).
 
@@ -1672,11 +1722,15 @@ def exec_main(argv: list[str]) -> int:
 def cli(argv: list[str] | None = None) -> int:
     """Route to the harness adapter named on the command line.
 
-    No argument → the Claude Code ``PreToolUse`` hook (:func:`main`).
+    No argument → inspect the parsed ``PreToolUse`` payload shape: Grok's
+    camelCase ``toolName`` / ``toolInput`` routes to :func:`_grok_event`;
+    Claude Code's snake_case ``tool_name`` / ``tool_input`` routes to
+    :func:`_claude_event`.
     ``--opencode`` → the OpenCode adapter (:func:`opencode_main`).
     ``--kiro`` → the Kiro CLI adapter (:func:`kiro_main`).
     ``--gemini`` → the Gemini CLI adapter (:func:`gemini_main`).
     ``--copilot`` → the Copilot CLI adapter (:func:`copilot_main`).
+    ``--grok`` → the Grok Build adapter (:func:`grok_main`).
     ``--check <cmd…>`` → harness-neutral check-only (:func:`check_main`).
     ``--exec <cmd…>`` → harness-neutral check-then-exec (:func:`exec_main`).
 
@@ -1693,6 +1747,16 @@ def cli(argv: list[str] | None = None) -> int:
         return gemini_main()
     if args and args[0] == "--copilot":
         return copilot_main()
+    if args and args[0] == "--grok":
+        return grok_main()
+    if not args:
+        try:
+            event = json.load(sys.stdin)
+        except (json.JSONDecodeError, ValueError):
+            return ALLOW_EXIT
+        if isinstance(event, dict) and event.get("toolName") == "run_terminal_command":
+            return _grok_event(event)
+        return _claude_event(event)
     if args and args[0] == "--check":
         return check_main(args[1:])
     if args and args[0] == "--exec":

@@ -139,9 +139,11 @@ rather than skills and are installed independently of the choice below:
 `magpie-agent-guard` (a `PreToolUse` hook that denies shell commands breaking a
 hard framework rule) and `magpie-vetted-ops` (a dispatcher for fixed,
 policy-scoped forge operations, so a session needs one allowlist entry instead
-of a dozen wildcard `ask` rules). Both run from the installed plugin, so no
-repository or worktree needs a local copy — and neither adds always-on skill
-context. Pick based on the trade-off between install simplicity and
+of a dozen wildcard `ask` rules).
+Both run from the installed plugin, so no repository or worktree needs a local copy.
+Grok Build can consume the existing Claude-compatible `magpie-agent-guard` plugin hook.
+The dispatcher selects the Grok protocol from the incoming hook payload shape.
+Neither substrate plugin adds always-on skill context. Pick based on the trade-off between install simplicity and
 always-on token cost (each installed skill advertises a short description to
 the model on **every** turn — see ["always-on" cost](#versioning) below).
 

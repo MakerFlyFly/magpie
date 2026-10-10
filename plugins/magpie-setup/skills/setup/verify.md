@@ -433,8 +433,8 @@ that the engine path it names **resolves**; a wired hook pointing at
 a file that is not there is the failure mode worth catching, because
 a guard that never loads does not raise — it silently stops denying.
 
-1. **Plugin install** — the `magpie-agent-guard` plugin is
-   installed. Its manifest carries the hook, so there is nothing
+1. **Plugin install** — the `magpie-agent-guard` plugin is installed.
+   Its `hooks/hooks.json` carries the hook, so there is nothing
    repository-local to check and nothing to remediate per worktree.
    - ⚠ if no agent-guard install of any kind is found: print
      `/plugin install magpie-agent-guard@apache-magpie`.
@@ -888,6 +888,25 @@ When the workspace has a Magpie Gemini policy or guard registration, run the sta
 Report missing components and configuration drift without modifying files.
 An absent profile is skipped unless Gemini secure setup was requested; in that case, point to `setup-isolated-setup-install`.
 A static pass does not replace live verification in Gemini.
+
+### 8h.1. Grok action guard (if configured)
+
+When Grok is a selected runtime, distinguish marketplace/plugin wiring from a source or pinned-snapshot project hook.
+For a marketplace install, confirm that `magpie-agent-guard` is installed and enabled and that no duplicate `.grok/hooks/magpie-agent-guard.json` was added merely to reach the executable.
+For a source or pinned snapshot, confirm that `.grok/hooks/magpie-agent-guard.json` exists, uses the `Bash` matcher, invokes `--grok`, and resolves to an existing `agent_guard/__init__.py`.
+
+Run `grok inspect --json` and report the loaded Magpie hook source.
+Warn when no Magpie guard is active or when more than one Magpie guard would inspect the same shell command.
+
+Static wiring is not sufficient.
+Ask the operator to perform one harmless allowed shell command and one known Magpie denial in Grok.
+Malformed input handled inside the adapter is fail-open, while Grok Build
+1.0.50 was observed to block hook-process exit 2. A live denial is still the
+verification that the configured hook, packaged runtime, and Magpie policy are
+actually enforcing together.
+
+Never grant, reset, or otherwise change Grok project-hook trust during verification.
+See [the Grok verification contract](../../../../docs/adapters/grok.md#verify).
 
 ### 8i. Adversarial reviewers (if configured)
 

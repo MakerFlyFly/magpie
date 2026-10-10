@@ -16,6 +16,7 @@
     - [Kiro CLI](#kiro-cli)
     - [Gemini CLI](#gemini-cli)
     - [Copilot CLI](#copilot-cli)
+    - [Grok](#grok)
     - [Harness-neutral path (any runtime)](#harness-neutral-path-any-runtime)
   - [Contributing guards](#contributing-guards)
   - [Tests](#tests)
@@ -29,7 +30,7 @@
 
 **Capability:** substrate:action-guard
 
-**Harness:** Claude Code, OpenCode, Kiro, Gemini CLI
+**Harness:** Claude Code, OpenCode, Kiro, Gemini CLI, Copilot, Grok
 
 A deterministic pre-execution guard dispatcher. It inspects every shell command
 **before it runs** and **denies** the ones that would break a hard framework
@@ -52,6 +53,12 @@ so every wired harness enforces an identical rule set from one source of truth:
   hook on `run_shell_command`, using `--gemini` (exit `2`, reason on stderr).
   The repository's `.gemini/settings.json` wires this hook; snapshot
   adopters register it in their own settings. See [Gemini CLI](#gemini-cli).
+- **Grok Build** — a `PreToolUse` hook on the `Bash` matcher.
+  Grok Build 1.0.46 was observed emitting `run_terminal_command` with the shell
+  command in `toolInput.command`.
+  Source/snapshot project hooks use `--grok`; marketplace plugin hooks are
+  selected automatically from Grok's incoming hook payload shape.
+  See [Grok](#grok).
 - **Any other runtime** — the `--check` and `--exec` CLI modes let any
   harness or shell wrapper enforce guard rules without a harness-specific hook
   adapter. See [Harness-neutral path (any runtime)](#harness-neutral-path-any-runtime).
@@ -145,10 +152,12 @@ Install the `magpie-agent-guard` plugin:
 /plugin install magpie-agent-guard@apache-magpie
 ```
 
-That is the whole installation. The plugin's manifest
-([`plugins/magpie-agent-guard/.claude-plugin/plugin.json`](../../plugins/magpie-agent-guard/.claude-plugin/plugin.json))
-registers the `PreToolUse` hook itself and resolves the engine under
-`${CLAUDE_PLUGIN_ROOT}`, so the guard runs out of the installed plugin. **No
+That is the whole installation.
+The plugin's
+[`hooks/hooks.json`](../../plugins/magpie-agent-guard/hooks/hooks.json)
+registers the `PreToolUse` hook and resolves the engine from the plugin root
+with `${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}`, so the guard runs out of
+the installed plugin. **No
 file is copied into any repository, no `settings.local.json` entry is written,
 and a git worktree needs no seeding** — it is an ordinary checkout, and the
 guard is active in it the moment the plugin is installed.
@@ -343,6 +352,47 @@ Manual registration, with the path replaced by the resolved framework directory:
 ```
 
 See [the Copilot install lifecycle](../../docs/adapters/copilot.md#install).
+
+### Grok
+
+The setup project-hook template
+[`plugins/magpie-setup/templates/grok-agent-guard-hook.json`](../../plugins/magpie-setup/templates/grok-agent-guard-hook.json)
+uses Grok's `PreToolUse` event with the `Bash` matcher and invokes `--grok`.
+The Magpie repository itself relies on the enabled marketplace plugin instead,
+so it does not also commit the active project hook.
+The payload contract was verified with Grok Build 1.0.46
+(`2765805b9442`) using a real captured event whose concrete shell tool was
+`run_terminal_command`. Marketplace/plugin loading and failure behavior were
+additionally verified on Grok Build 1.0.50 (`c58f321264ba`).
+
+Grok sends the command in `toolInput.command`.
+The adapter forwards that command and an optional string `cwd` to the shared
+`dispatch()` core.
+A guard hit returns Grok's deny decision with the shared reason.
+An allowed shell command exits 0 without emitting a decision.
+
+Marketplace installs do not need a second repository-local hook merely to reach
+the executable.
+The plugin registers its Grok-compatible hook in `hooks/hooks.json`, resolves
+the bundled runtime with `${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}`, and
+selects the Grok adapter from the incoming camelCase hook payload.
+The runtime is materialized as real files inside the plugin because Grok's
+local plugin installation does not preserve the former out-of-root symlink.
+
+Framework checkouts and pinned snapshots may use the Magpie-owned project hook.
+Project hooks remain trust-gated by Grok.
+Magpie must never grant or reset that trust on the operator's behalf.
+
+Malformed or unrelated events handled inside the adapter fail open by
+returning exit 0.
+
+Hook-process failure is different. On Grok Build 1.0.50, a bare exit 2 with no
+deny JSON blocked the shell tool call, and a missing Python hook target that
+exited 2 was also blocked. Installation verification should still include a
+known live denial so wiring, packaging, and runtime policy are exercised
+together.
+
+See the [Grok adapter contract](../../docs/adapters/grok.md).
 
 ### Harness-neutral path (any runtime)
 

@@ -246,23 +246,33 @@ SUBSTRATE_PLUGINS: dict[str, dict] = {
             "that denies shell commands which would break a hard framework rule. Runs from "
             "the installed plugin, so no repository or worktree needs a local copy."
         ),
-        # <link path under the plugin root> -> <tools/ subdirectory it exposes>
-        "links": {"tools/agent-guard": "agent-guard"},
-        # Files that must resolve *through* those links for the hook to fire.
+        # Materialize the runtime package inside the plugin. Marketplace clients
+        # may drop symlinks whose targets escape the plugin root.
+        "copies": {
+            "tools/agent-guard/src/agent_guard": "tools/agent-guard/src/agent_guard",
+        },
+        "links": {},
+        # Files that must exist inside the generated plugin for the hook to fire.
         "must_resolve": (AGENT_GUARD_ENGINE,),
-        "hooks": {
-            "PreToolUse": [
-                {
-                    "matcher": "Bash",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": f'python3 "${{CLAUDE_PLUGIN_ROOT}}/{AGENT_GUARD_ENGINE}"',
-                            "timeout": 30,
-                        }
-                    ],
-                }
-            ]
+        "hook_config": {
+            "description": "Apache Magpie agent guard",
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    f'python3 "${{GROK_PLUGIN_ROOT:-${{CLAUDE_PLUGIN_ROOT}}}}/'
+                                    f'{AGENT_GUARD_ENGINE}"'
+                                ),
+                                "timeout": 30,
+                            }
+                        ],
+                    }
+                ]
+            },
         },
     },
     "magpie-vetted-ops": {
@@ -343,9 +353,9 @@ def substrate_manifest(name: str, shared: dict) -> dict:
     truth `check` compares the on-disk file against."""
     spec = SUBSTRATE_PLUGINS[name]
     manifest = {"name": name, "description": spec["description"], **shared}
-    # A substrate plugin exists to publish a tool from the installed plugin root.
-    # Wiring a hook is one reason to need that, not the only one, so a spec
-    # without `hooks` emits a manifest without the key rather than an empty one.
+    # Some substrate plugins still publish inline manifest hooks. Others, such
+    # as magpie-agent-guard, use hook_config so Claude and Grok share a single
+    # hooks/hooks.json registration source.
     if "hooks" in spec:
         manifest["hooks"] = spec["hooks"]
     return manifest
@@ -393,10 +403,27 @@ def check_substrate(name: str, shared: dict) -> list[str]:
         errors.append(f"{path}: missing/empty 'description'")
     if "skills" in data:
         errors.append(f"{path}: substrate plugins ship a tool, not skills — drop 'skills'")
-    if data.get("hooks") != spec.get("hooks"):
+    hook_config = spec.get("hook_config")
+    if hook_config is not None and "hooks" in data:
+        errors.append(f"{path}: substrate hook wiring belongs in hooks/hooks.json, not the manifest")
+    elif hook_config is None and data.get("hooks") != spec.get("hooks"):
         errors.append(
             f"{path}: 'hooks' does not match the wiring the framework expects (regenerate with --fix)"
         )
+
+    hook_path = pdir / "hooks" / "hooks.json"
+    if hook_config is not None:
+        if not hook_path.is_file():
+            errors.append(f"{hook_path}: missing substrate hook configuration")
+        else:
+            hook_data, hook_err = load_json(hook_path)
+            if hook_err:
+                errors.append(hook_err)
+            elif hook_data != hook_config:
+                errors.append(
+                    f"{hook_path}: hook wiring does not match the framework expectation "
+                    "(regenerate with --fix)"
+                )
     for key, want in (shared or {}).items():
         if data.get(key) != want:
             errors.append(
@@ -411,13 +438,40 @@ def check_substrate(name: str, shared: dict) -> list[str]:
         elif link.readlink() != want:
             errors.append(f"{name}: {link} -> {link.readlink()} (expected {want})")
 
-    # A manifest and a symlink that both look right still leave the hook dead if
+    for dest_rel, src_rel in spec.get("copies", {}).items():
+        dest = pdir / dest_rel
+        src = Path(src_rel)
+        if not dest.is_dir():
+            errors.append(f"{name}: {dest} is missing copied runtime tree")
+        elif not src.is_dir():
+            errors.append(f"{name}: source runtime tree {src} is missing")
+        else:
+            src_files = sorted(
+                path.relative_to(src)
+                for path in src.rglob("*")
+                if path.is_file() and "__pycache__" not in path.parts
+            )
+            dest_files = sorted(
+                path.relative_to(dest)
+                for path in dest.rglob("*")
+                if path.is_file() and "__pycache__" not in path.parts
+            )
+            if dest_files != src_files:
+                errors.append(f"{name}: copied runtime tree {dest} is out of sync (regenerate with --fix)")
+            else:
+                for rel in src_files:
+                    if (dest / rel).read_bytes() != (src / rel).read_bytes():
+                        errors.append(
+                            f"{name}: copied runtime file {dest / rel} is out of sync (regenerate with --fix)"
+                        )
+
+    # A manifest and its packaged runtime can both look right while the hook is dead if
     # the file the command names is not reachable from the plugin root.
     for rel in spec["must_resolve"]:
         if not (pdir / rel).is_file():
             consequence = (
-                "the hook command names it, so the hook would silently never run"
-                if "hooks" in spec
+                "the hook command names it, so the guard cannot execute"
+                if "hook_config" in spec
                 else "the tool's entry point names it, so every call would fail to start"
             )
             errors.append(f"{name}: {pdir / rel} does not resolve — {consequence}")
@@ -438,9 +492,47 @@ def write_substrate(name: str, shared: dict) -> None:
                 continue
             link.unlink()
         link.symlink_to(want)
+
+    for dest_rel, src_rel in spec.get("copies", {}).items():
+        dest_rel_path = Path(dest_rel)
+        dest = pdir / dest_rel_path
+        src = Path(src_rel)
+
+        # A previous substrate layout may have exposed this destination through
+        # a symlink whose target lives outside the plugin. Remove that ancestor
+        # symlink itself before touching any descendant, otherwise rmtree()
+        # would follow it and delete source files in the framework checkout.
+        for depth in range(1, len(dest_rel_path.parts)):
+            ancestor = pdir.joinpath(*dest_rel_path.parts[:depth])
+            if ancestor.is_symlink():
+                ancestor.unlink()
+                break
+
+        if dest.exists() or dest.is_symlink():
+            if dest.is_symlink() or dest.is_file():
+                dest.unlink()
+            else:
+                shutil.rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            src,
+            dest,
+            ignore=shutil.ignore_patterns(
+                "__pycache__",
+                "*.pyc",
+                ".pytest_cache",
+                ".ruff_cache",
+                ".mypy_cache",
+            ),
+        )
+
     (pdir / ".claude-plugin" / "plugin.json").write_text(
         json.dumps(substrate_manifest(name, shared), indent=2) + "\n", encoding="utf-8"
     )
+    if hook_config := spec.get("hook_config"):
+        hook_dir = pdir / "hooks"
+        hook_dir.mkdir(parents=True, exist_ok=True)
+        (hook_dir / "hooks.json").write_text(json.dumps(hook_config, indent=2) + "\n", encoding="utf-8")
 
 
 def pyproject_version() -> tuple[str | None, list[str]]:
@@ -872,19 +964,30 @@ def unowned_entries(pdir: Path) -> list[str]:
     if not pdir.is_dir():
         return []
     mdir = pdir / ".claude-plugin"
-    # A substrate plugin owns its tool-symlink parents instead of `skills/`.
+    # A substrate plugin owns its generated tool parents instead of `skills/`.
+    hook_dir = None
     if spec := SUBSTRATE_PLUGINS.get(pdir.name):
         owned = {mdir} | {pdir / Path(link).parts[0] for link in spec["links"]}
+        owned |= {pdir / Path(dest).parts[0] for dest in spec.get("copies", {})}
         link_dirs = [pdir / Path(link).parent for link in spec["links"]]
+        if "hook_config" in spec:
+            hook_dir = pdir / "hooks"
+            owned.add(hook_dir)
     else:
         owned = {mdir, pdir / "skills"}
         link_dirs = [pdir / "skills"]
+
     unexpected = sorted(p for p in pdir.iterdir() if p not in owned)
+
     if mdir.is_dir():
         unexpected += sorted(p for p in mdir.iterdir() if p.name != "plugin.json")
+
     for sdir in link_dirs:
         if sdir.is_dir():
             unexpected += sorted(p for p in sdir.iterdir() if not p.is_symlink())
+
+    if hook_dir is not None and hook_dir.is_dir():
+        unexpected += sorted(p for p in hook_dir.iterdir() if p.name != "hooks.json")
     if not unexpected:
         return []
     return [

@@ -77,6 +77,10 @@ def _manifest(tree: Path) -> Path:
     return tree / "plugins" / NAME / ".claude-plugin" / "plugin.json"
 
 
+def _hooks(tree: Path) -> Path:
+    return tree / "plugins" / NAME / "hooks" / "hooks.json"
+
+
 def _rewrite(path: Path, **changes) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     data.update(changes)
@@ -87,18 +91,31 @@ def test_generated_substrate_plugin_passes_its_own_check(tree):
     assert mod.check_substrate(NAME, SHARED) == []
 
 
-def test_generated_manifest_wires_the_engine_under_the_plugin_root(tree):
+def test_generated_hook_config_wires_the_engine_under_the_plugin_root(tree):
     manifest = json.loads(_manifest(tree).read_text(encoding="utf-8"))
-    command = manifest["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    assert "${CLAUDE_PLUGIN_ROOT}" in command
+    assert "hooks" not in manifest
+
+    hooks = json.loads(_hooks(tree).read_text(encoding="utf-8"))
+    command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert "${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}" in command
     assert mod.AGENT_GUARD_ENGINE in command
-    # The path the command names must be reachable through the generated symlink.
+    # The path the command names must exist inside the generated plugin.
     assert (tree / "plugins" / NAME / mod.AGENT_GUARD_ENGINE).is_file()
 
 
 def test_altered_hook_wiring_is_reported(tree):
+    _rewrite(_hooks(tree), hooks={"PreToolUse": []})
+    assert any("hook wiring does not match" in e for e in mod.check_substrate(NAME, SHARED))
+
+
+def test_missing_hook_config_is_reported(tree):
+    _hooks(tree).unlink()
+    assert any("missing substrate hook configuration" in e for e in mod.check_substrate(NAME, SHARED))
+
+
+def test_inline_manifest_hook_is_reported(tree):
     _rewrite(_manifest(tree), hooks={"PreToolUse": []})
-    assert any("'hooks' does not match" in e for e in mod.check_substrate(NAME, SHARED))
+    assert any("belongs in hooks/hooks.json" in e for e in mod.check_substrate(NAME, SHARED))
 
 
 def test_a_substrate_plugin_declaring_skills_is_reported(tree):
@@ -111,24 +128,24 @@ def test_metadata_not_inherited_from_the_root_manifest_is_reported(tree):
     assert any("'version' is '0.0.1'" in e for e in mod.check_substrate(NAME, SHARED))
 
 
-def test_a_repointed_tool_symlink_is_reported(tree):
-    link = tree / "plugins" / NAME / "tools" / "agent-guard"
-    link.unlink()
-    link.symlink_to("../../../tools/something-else")
-    assert any("expected ../../../tools/agent-guard" in e for e in mod.check_substrate(NAME, SHARED))
+def test_altered_copied_runtime_is_reported(tree):
+    runtime = tree / "plugins" / NAME / "tools" / "agent-guard" / "src" / "agent_guard" / "__init__.py"
+    runtime.write_text("# altered\n", encoding="utf-8")
+    assert any("copied runtime file" in e and "out of sync" in e for e in mod.check_substrate(NAME, SHARED))
 
 
-def test_a_symlink_replaced_by_a_real_directory_is_reported(tree):
-    link = tree / "plugins" / NAME / "tools" / "agent-guard"
-    link.unlink()
-    link.mkdir()
-    assert any("not a symlink" in e for e in mod.check_substrate(NAME, SHARED))
+def test_missing_copied_runtime_is_reported(tree):
+    import shutil
+
+    runtime = tree / "plugins" / NAME / "tools" / "agent-guard" / "src" / "agent_guard"
+    shutil.rmtree(runtime)
+    assert any("missing copied runtime tree" in e for e in mod.check_substrate(NAME, SHARED))
 
 
 def test_an_engine_that_does_not_resolve_is_reported(tree):
-    """The manifest and the symlink can both be right while the file the hook
-    command names has moved — the case where the guard silently never runs."""
-    (tree / "tools" / "agent-guard" / "src" / "agent_guard" / "__init__.py").unlink()
+    """The generated plugin can be wired correctly while the packaged engine
+    named by the hook is missing."""
+    (tree / "plugins" / NAME / mod.AGENT_GUARD_ENGINE).unlink()
     assert any("does not resolve" in e for e in mod.check_substrate(NAME, SHARED))
 
 
@@ -188,7 +205,9 @@ def test_fix_regenerates_a_deleted_substrate_plugin(tree, monkeypatch):
     shutil.rmtree(tree / "plugins" / NAME)
     mod.write_substrate(NAME, SHARED)
     assert mod.check_substrate(NAME, SHARED) == []
-    assert os.path.islink(tree / "plugins" / NAME / "tools" / "agent-guard")
+    runtime = tree / "plugins" / NAME / "tools" / "agent-guard" / "src" / "agent_guard" / "__init__.py"
+    assert runtime.is_file()
+    assert not os.path.islink(tree / "plugins" / NAME / "tools" / "agent-guard")
 
 
 # ---------------------------------------------------------------------------

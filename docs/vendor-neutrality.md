@@ -623,7 +623,7 @@ Organization scope (declared, orthogonal to vendor): ASF = 16, agnostic = 63.
 | Substrate tool | Substrate | Harness support | Verdict |
 |---|---|---|---|
 | `adversarial-review` | review | any | ✅ agnostic |
-| `agent-guard` | action-guard | Claude Code, Gemini CLI, Kiro, OpenCode | ✅ portable |
+| `agent-guard` | action-guard | Claude Code, Copilot, Gemini CLI, Grok, Kiro, OpenCode | ✅ portable |
 | `agent-isolation` | sandbox | any | ✅ agnostic |
 | `container-gateway` | sandbox | any | ✅ agnostic |
 | `contributor-metrics` | analytics | any | ✅ agnostic |
@@ -659,8 +659,10 @@ Harness → substrate tools it supports:
 
 - **Claude Code** (3): `agent-guard`, `sandbox-lint`, `spec-loop`
 - **Codex** (2): `sandbox-lint`, `spec-loop`
+- **Copilot** (1): `agent-guard`
 - **Cursor** (2): `sandbox-lint`, `spec-loop`
 - **Gemini CLI** (3): `agent-guard`, `sandbox-lint`, `spec-loop`
+- **Grok** (1): `agent-guard`
 - **Kiro** (3): `agent-guard`, `sandbox-lint`, `spec-loop`
 - **OpenCode** (3): `agent-guard`, `sandbox-lint`, `spec-loop`
 - **any harness** (29): `adversarial-review`, `agent-isolation`, `container-gateway`, `contributor-metrics`, `dashboard-generator`, `dev`, `egress-gateway`, `maven-artifact-verify`, `permission-audit`, `pilot-report-validator`, `pr-management`, `preflight-audit`, `privacy-llm`, `probe-templates`, `release-config`, `release-verify`, `reproducible-archive`, `security-tracker-stats-dashboard`, `setup-preflight`, `skill-and-tool-validator`, `skill-evals`, `skill-reconciler-diff`, `skill-token-count`, `spec-inventory`, `spec-status-index`, `spec-validator`, `symlink-lint`, `vendor-neutrality-score`, `vetted-ops`

@@ -1923,6 +1923,28 @@ Four passes, in this order:
    Follow [the Gemini install lifecycle](../../../../docs/adapters/gemini.md#install) to propose and merge its workspace profile and guard registration from this snapshot.
    Preserve unrelated configuration and review conflicts before applying changes.
    Validate the merged profile and hand off live verification to Gemini.
+   **Grok action guard (when Grok is the selected runtime).**
+   First distinguish a marketplace/plugin install from a source or pinned-snapshot install.
+   When `magpie-agent-guard` is already available as an enabled marketplace plugin, use that bundled hook and executable.
+   Do not create a second project hook or `.apache-magpie/` snapshot merely to reach the guard.
+
+   For a framework checkout or pinned snapshot, install exactly one Magpie-owned project hook at
+   `<repo-root>/.grok/hooks/magpie-agent-guard.json`.
+   Create `.grok/hooks/` when absent, but never treat that directory as Magpie-owned and never modify or remove unrelated files already present there.
+   Derive the adopter hook from the framework's committed `plugins/magpie-setup/templates/grok-agent-guard-hook.json`.
+   Preserve its event, `Bash` matcher, handler type, timeout, and `--grok` invocation.
+   For a pinned snapshot, change only the executable path to
+   `$GROK_WORKSPACE_ROOT/.apache-magpie/tools/agent-guard/src/agent_guard/__init__.py`.
+
+   If that exact hook file already exists and differs, surface the diff before replacement.
+   Do not overwrite hand-edited content silently.
+   Preserve every other `.grok/hooks/*` file and do not modify `.grok/config.toml`.
+
+   Grok project hooks require an explicit operator trust decision.
+   Tell the operator to review and trust the hook in Grok after installation.
+   Never invoke or automate Grok's hook-trust action on their behalf.
+
+   See [the Grok adapter lifecycle](../../../../docs/adapters/grok.md#installation).
    Other selected runtimes do not install this profile.
 
 2. **Propagate to every worktree (run `worktree-init`

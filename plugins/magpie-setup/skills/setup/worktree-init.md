@@ -264,10 +264,10 @@ The deterministic guard
 from wherever it is installed **once**, never from a per-worktree
 copy:
 
-- **Plugin install** (`magpie-agent-guard`) — the plugin's own
-  manifest registers the `PreToolUse` hook and resolves the engine
-  under `${CLAUDE_PLUGIN_ROOT}`. Nothing is repository-local, so a
-  worktree is covered the moment it exists.
+- **Plugin install** (`magpie-agent-guard`) — the plugin's
+  `hooks/hooks.json` registers the `PreToolUse` hook and resolves the engine
+  with `${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}`.
+  Nothing is repository-local, so a worktree is covered the moment it exists.
 - **Snapshot install** — the `settings.local.json` wiring resolves
   the engine inside the snapshot
   (`$CLAUDE_PROJECT_DIR/.apache-magpie/tools/agent-guard/src/agent_guard/__init__.py`),

@@ -333,13 +333,13 @@ def _write_substrate(root, name: str, capability: str, harness: str) -> None:
 
 def test_harness_verdicts(tmp_path) -> None:
     _write_substrate(tmp_path, "guard", "substrate:action-guard", "Claude Code")
-    _write_substrate(tmp_path, "multi", "substrate:sandbox", "Claude Code, Codex")
+    _write_substrate(tmp_path, "multi", "substrate:sandbox", "Claude Code, Codex, Grok")
     _write_substrate(tmp_path, "checker", "substrate:framework-dev", "agnostic")
     by_tool = {r.tool: r for r in vns.load_substrate_harnesses(tmp_path)}
     assert by_tool["guard"].verdict == "coupled"  # single harness
     assert by_tool["multi"].verdict == "portable"  # two harnesses
     assert by_tool["checker"].verdict == "agnostic"  # no harness dependency
-    assert by_tool["multi"].harnesses == ("Claude Code", "Codex")
+    assert by_tool["multi"].harnesses == ("Claude Code", "Codex", "Grok")
 
 
 def test_harness_missing_field_raises(tmp_path) -> None:
