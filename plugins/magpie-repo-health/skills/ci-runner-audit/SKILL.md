@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 2717
+measured_tokens: 2848
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -197,8 +197,10 @@ For only one check, replace `all` with `retired` or `macos-arch`.
 Use `--refresh` for org scans when cached repo/workflow inventory may be
 stale. Explicit `--repo` and `--repo-file` scans fetch repository
 metadata directly.
-Org scans use `<owner>-workflow-files-v2.tsv` and rebuild older inventories automatically.
-Only a complete workflow listing is cached, through an atomic replacement; a failed refresh preserves the previous complete inventory and reports the current run as incomplete.
+Org scans use `<owner>-repos-v2.jsonl` and `<owner>-workflow-files-v3.tsv`; older unverified inventories are retained but ignored and rebuilt automatically.
+Both inventories are published through atomic replacements only after complete, valid enumeration.
+A failed refresh preserves previous complete inventories; the current scan uses current enumeration results without falling back to stale workflows.
+Cache-write failures are reported at stage `cache` while valid in-memory workflows continue to be scanned.
 
 ---
 
@@ -214,11 +216,14 @@ The script writes TSV files under `--out-dir`:
   architecture candidates for human review. Expect false positives.
 - `<scope>-scan-errors.tsv` — failures with `repo`, `path`, `stage`, `error`, and `html_url` context; header-only when there are no errors.
 
-The script keeps successful findings when an individual repository or workflow fails.
+The script keeps successful findings when an individual repository, workflow-list entry, workflow, or selected check fails.
+In `all` mode, a failed check reports stage `check` and its check name while retaining the other check's findings.
 It prints `scan_complete`, `workflows_scanned`, and `scan_errors` to stderr; `workflows_scanned` counts files that completed every requested check.
 Exit status is `0` for a complete scan, `1` for an incomplete scan or output failure, and `2` for unavailable prerequisites or invalid arguments.
 Global prerequisite failures and failed org discovery terminate immediately; local failures are collected while the remaining work continues.
-Only a workflow-directory HTTP 404 or a successful empty listing means no workflows.
+A workflow-directory HTTP 404 means no workflows only after the target ref resolves to a valid commit SHA and a retry at that SHA also returns 404.
+A missing or inaccessible ref, failed verification, or malformed response makes the scan incomplete; use `--refresh` to update stale org metadata.
+A successful empty listing also means no workflows.
 
 Use `--scope-name` for stable output names for project or repo-set
 scans.

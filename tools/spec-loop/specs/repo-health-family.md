@@ -99,10 +99,13 @@ grouped, prioritised report → wait for confirmation before any write.
   freshness, license compliance, test stability). Skills do not share
   intermediate state, so each runs independently.
 - **A failed scan is never a clean result.**
-  `ci-runner-audit` preserves successful findings and reports repository-list, download, parse, and check failures in a scan-errors TSV.
+  `ci-runner-audit` preserves successful repository, workflow and per-check findings and reports discovery, cache, download, parse, and check failures in a scan-errors TSV.
   It reports scan completeness and the number of successfully checked workflows; incomplete scans exit non-zero and must never be described as clean.
   Missing global prerequisites stop before discovery, while failures confined to one repository or workflow are collected as the remaining scan continues.
-  Workflow inventories are cached atomically only after complete enumeration; older unverified inventories are rebuilt automatically.
+  Repository v2 and workflow v3 inventories are cached atomically only after complete, valid enumeration; older unverified inventories are rebuilt automatically.
+  Cache persistence failures keep in-memory results usable while the scan reports incomplete.
+  A directory 404 is empty only after ref verification and a second 404 at the resolved commit SHA; invalid refs and malformed entries are errors.
+  Subprocess responses use strict UTF-8 decoding, with tolerant failure diagnostics and structured errors for missing streams.
   `workflow-security-audit`
   keeps zizmor's error output visible; a repository whose scan exits with
   an unexpected non-zero status is listed as a scan failure with that

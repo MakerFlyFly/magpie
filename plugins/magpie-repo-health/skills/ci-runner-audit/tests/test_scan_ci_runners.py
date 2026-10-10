@@ -28,6 +28,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -55,22 +56,55 @@ class ScanTest(unittest.TestCase):
         self.auth_failure = False
         self.org_failure = False
         self.invalid_json = False
+        self.branch = "main"
+        self.sha = "a" * 40
+        self.commit_response: object = {"sha": self.sha}
+        self.ref_failures: dict[str, int] = {}
+        self.retry_recovers = False
+        self.retry_failure: int | None = None
+        self.org_output: str | None = None
+        self.process_run = subprocess.run
         self.gh = mock.patch.object(scan.subprocess, "run", side_effect=self.gh_run).start()
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(scan, "yaml", SimpleNamespace(safe_load=json.loads)).start()
 
+    @staticmethod
+    def completed(args, code, stdout="", stderr=""):
+        return subprocess.CompletedProcess(
+            args,
+            code,
+            stdout.encode("utf-8") if isinstance(stdout, str) else stdout,
+            stderr.encode("utf-8") if isinstance(stderr, str) else stderr,
+        )
+
     def gh_run(self, args, **kwargs):
         if args[1:3] == ["auth", "status"]:
-            return subprocess.CompletedProcess(args, int(self.auth_failure), "", "authentication unavailable")
+            return self.completed(args, int(self.auth_failure), "", "authentication unavailable")
         endpoint = args[2]
         if endpoint == "--paginate":
-            output = "\n".join(json.dumps({"full_name": r, "default_branch": "main"}) for r in self.repos)
-            return subprocess.CompletedProcess(args, int(self.org_failure), output, "org list failed")
+            output = (
+                self.org_output
+                if self.org_output is not None
+                else "\n".join(
+                    json.dumps({"full_name": r, "default_branch": self.branch}, ensure_ascii=False)
+                    for r in self.repos
+                )
+            )
+            return self.completed(args, int(self.org_failure), output, "org list failed")
+        if "/commits/" in endpoint:
+            repo = endpoint.removeprefix("repos/").split("/commits/")[0]
+            if repo in self.ref_failures:
+                return self.completed(args, 1, "", f"gh: ref inaccessible (HTTP {self.ref_failures[repo]})")
+            return self.completed(args, 0, json.dumps(self.commit_response), "")
         if "/contents/" in endpoint:
             repo = endpoint.removeprefix("repos/").split("/contents/")[0]
             if repo in self.list_failures:
                 status = self.list_failures[repo]
-                return subprocess.CompletedProcess(args, 1, "", f"gh: listing failed (HTTP {status})")
+                retry = endpoint.endswith(f"ref={self.sha}")
+                if retry and self.retry_failure is not None:
+                    return self.completed(args, 1, "", f"gh: retry failed (HTTP {self.retry_failure})")
+                if not (retry and self.retry_recovers):
+                    return self.completed(args, 1, "", f"gh: listing failed (HTTP {status})")
             contents = [
                 {
                     "type": "file",
@@ -79,15 +113,16 @@ class ScanTest(unittest.TestCase):
                 }
             ]
             output = json.dumps(
-                self.unexpected_contents if self.unexpected_contents is not None else contents
+                self.unexpected_contents if self.unexpected_contents is not None else contents,
+                ensure_ascii=False,
             )
-            return subprocess.CompletedProcess(args, 0, "invalid JSON" if self.invalid_json else output, "")
+            return self.completed(args, 0, "invalid JSON" if self.invalid_json else output, "")
         repo = endpoint.removeprefix("repos/")
         if repo in self.metadata_failures:
             status = self.metadata_failures[repo]
-            return subprocess.CompletedProcess(args, 1, "", f"gh: metadata failed (HTTP {status})")
-        return subprocess.CompletedProcess(
-            args, 0, json.dumps({"full_name": repo, "default_branch": "main"}), ""
+            return self.completed(args, 1, "", f"gh: metadata failed (HTTP {status})")
+        return self.completed(
+            args, 0, json.dumps({"full_name": repo, "default_branch": self.branch}, ensure_ascii=False), ""
         )
 
     def invoke(self, *args: str) -> tuple[int, str]:
@@ -245,19 +280,19 @@ class ScanTest(unittest.TestCase):
         code, stderr = self.invoke("all", "--owner", "example")
         self.assertEqual(code, 1)
         self.assertIn("org list failed", stderr)
-        self.assertFalse((self.cache / "example-repos.jsonl").exists())
+        self.assertFalse((self.cache / "example-repos-v2.jsonl").exists())
         self.assertEqual(self.gh.call_count, 2)
 
     def test_incomplete_inventory_is_not_cached_and_recovers_without_refresh(self) -> None:
         self.list_failures = {"example/retired": 403}
         code, _ = self.invoke("retired", "--owner", "example")
         self.assertEqual(code, 1)
-        self.assertFalse((self.cache / "example-workflow-files-v2.tsv").exists())
+        self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
         self.list_failures = {}
         code, _ = self.invoke("retired", "--owner", "example")
         self.assertEqual(code, 0)
         self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
-        self.assertTrue((self.cache / "example-workflow-files-v2.tsv").exists())
+        self.assertTrue((self.cache / "example-workflow-files-v3.tsv").exists())
 
     def test_old_inventory_is_rebuilt(self) -> None:
         self.cache.mkdir()
@@ -270,7 +305,7 @@ class ScanTest(unittest.TestCase):
 
     def test_refresh_failure_preserves_complete_inventory(self) -> None:
         self.invoke("retired", "--owner", "example")
-        cache = self.cache / "example-workflow-files-v2.tsv"
+        cache = self.cache / "example-workflow-files-v3.tsv"
         complete = cache.read_bytes()
         self.list_failures = {"example/retired": 403}
         code, stderr = self.invoke("retired", "--owner", "example", "--refresh")
@@ -288,18 +323,28 @@ class ScanTest(unittest.TestCase):
 
     def test_atomic_cache_write_failure_preserves_previous_inventory(self) -> None:
         self.invoke("retired", "--owner", "example")
-        cache = self.cache / "example-workflow-files-v2.tsv"
+        cache = self.cache / "example-workflow-files-v3.tsv"
         complete = cache.read_bytes()
         before = set(self.cache.iterdir())
-        with mock.patch.object(scan.os, "replace", side_effect=OSError("replace failed")):
-            code, _ = self.invoke("retired", "--owner", "example", "--refresh")
+        replace = scan.os.replace
+
+        def fail_workflow_replace(source, target):
+            if target == cache:
+                raise OSError("replace failed")
+            return replace(source, target)
+
+        with mock.patch.object(scan.os, "replace", side_effect=fail_workflow_replace):
+            code, stderr = self.invoke("retired", "--owner", "example", "--refresh")
         self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=2", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+        self.assertEqual(self.rows("scan-errors", "example")[0]["stage"], "cache")
         self.assertEqual(cache.read_bytes(), complete)
         self.assertEqual(set(self.cache.iterdir()), before)
 
     def test_invalid_cached_header_is_rebuilt(self) -> None:
         self.cache.mkdir()
-        (self.cache / "example-workflow-files-v2.tsv").write_text("bad-header\n", encoding="utf-8")
+        (self.cache / "example-workflow-files-v3.tsv").write_text("bad-header\n", encoding="utf-8")
         code, _ = self.invoke("retired", "--owner", "example")
         self.assertEqual(code, 0)
         self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
@@ -323,6 +368,470 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("scan_complete=false", stderr)
         self.assertIn("[output]", stderr)
+
+    def test_invalid_or_inaccessible_ref_404_is_not_an_empty_directory(self) -> None:
+        self.list_failures = {"example/retired": 404}
+        for status in [404, 403, 429, 500]:
+            with self.subTest(status=status):
+                self.ref_failures = {"example/retired": status}
+                code, stderr = self.invoke("retired", "--owner", "example")
+                self.assertEqual(code, 1)
+                self.assertIn("workflows_scanned=1", stderr)
+                self.assertIn("listing failed (HTTP 404)", stderr)
+                self.assertIn(f"ref inaccessible (HTTP {status})", stderr)
+                self.assertEqual(self.rows("scan-errors", "example")[0]["stage"], "workflow-list")
+                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+        self.list_failures = {}
+        self.ref_failures = {}
+        code, _ = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+
+    def test_stale_cached_default_branch_requires_metadata_refresh(self) -> None:
+        self.cache.mkdir()
+        (self.cache / "example-repos-v2.jsonl").write_text(
+            json.dumps({"full_name": "example/retired", "default_branch": "deleted-old-branch"}),
+            encoding="utf-8",
+        )
+        response = self.gh_run
+
+        def stale_ref(args, **kwargs):
+            if "deleted-old-branch" in args[2]:
+                return self.completed(args, 1, "", "gh: No commit found for the ref (HTTP 404)")
+            return response(args, **kwargs)
+
+        self.gh.side_effect = stale_ref
+        code, stderr = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertIn("scan_complete=false", stderr)
+        self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+        code, _ = self.invoke("retired", "--owner", "example", "--refresh")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+
+    def test_404_ref_validation_rejects_abnormal_responses(self) -> None:
+        self.list_failures = {"example/retired": 404}
+        responses: list[object] = [None, [], {}, {"sha": None}, {"sha": "main"}, {"sha": 123}]
+        for response in responses:
+            with self.subTest(response=response):
+                self.commit_response = response
+                code, stderr = self.invoke("all", "--repo", "example/retired")
+                self.assertEqual(code, 1)
+                self.assertIn("cannot verify ref", stderr)
+                self.assertIn("listing failed (HTTP 404)", stderr)
+
+    def test_404_ref_validation_rejects_invalid_json(self) -> None:
+        self.list_failures = {"example/retired": 404}
+        response = self.gh_run
+
+        def invalid_ref_json(args, **kwargs):
+            if "/commits/" in args[2]:
+                return self.completed(args, 0, "invalid JSON", "")
+            return response(args, **kwargs)
+
+        self.gh.side_effect = invalid_ref_json
+        code, stderr = self.invoke("retired", "--repo", "example/retired")
+        self.assertEqual(code, 1)
+        self.assertIn("cannot verify ref", stderr)
+
+    def test_404_retry_at_verified_sha_can_recover(self) -> None:
+        self.list_failures = {"example/retired": 404}
+        self.retry_recovers = True
+        code, stderr = self.invoke("retired", "--repo", "example/retired")
+        self.assertEqual(code, 0)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed")), 1)
+        endpoints = [call.args[0][2] for call in self.gh.call_args_list]
+        self.assertIn(f"repos/example/retired/contents/.github/workflows?ref={self.sha}", endpoints)
+
+    def test_verified_sha_retry_failures_are_not_empty_results(self) -> None:
+        self.list_failures = {"example/retired": 404}
+        for status in [403, 429, 500]:
+            with self.subTest(status=status):
+                self.retry_failure = status
+                code, stderr = self.invoke("all", "--repo", "example/retired")
+                self.assertEqual(code, 1)
+                self.assertIn("listing failed (HTTP 404)", stderr)
+                self.assertIn(f"retry failed (HTTP {status})", stderr)
+        self.retry_failure = None
+        self.retry_recovers = True
+        self.invalid_json = True
+        code, stderr = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 1)
+        self.assertIn("directory retry", stderr)
+
+    def test_ref_is_encoded_in_both_directory_and_commit_requests(self) -> None:
+        self.branch = "feature/ci+#"
+        self.list_failures = {"example/retired": 404}
+        self.retry_recovers = True
+        code, _ = self.invoke("retired", "--repo", "example/retired")
+        self.assertEqual(code, 0)
+        endpoints = [call.args[0][2] for call in self.gh.call_args_list]
+        encoded = quote(self.branch, safe="")
+        self.assertIn(f"repos/example/retired/contents/.github/workflows?ref={encoded}", endpoints)
+        self.assertIn(f"repos/example/retired/commits/{encoded}", endpoints)
+        self.assertIn(encoded, self.rows("retired-gh-runners-confirmed")[0]["html_url"])
+
+    def test_successful_listing_does_not_probe_ref(self) -> None:
+        code, _ = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 0)
+        self.assertFalse(any("/commits/" in call.args[0][2] for call in self.gh.call_args_list))
+
+    def test_malformed_entries_preserve_valid_workflows(self) -> None:
+        self.unexpected_contents = [
+            {},
+            {"type": "file"},
+            {"path": ".github/workflows/ci.yml"},
+            {
+                "type": "file",
+                "path": ".github/workflows/ci.yml",
+                "download_url": self.files[self.repos[0]].as_uri(),
+            },
+        ]
+        code, stderr = self.invoke("retired", "--repo", "example/retired")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertIn("scan_errors=3", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed")), 1)
+        self.assertTrue(all(row["stage"] == "workflow-list" for row in self.rows("scan-errors")))
+
+    def test_malformed_entries_do_not_publish_inventory_and_recover(self) -> None:
+        for item in [
+            {},
+            {"type": "file"},
+            {"path": ".github/workflows/ci.yml"},
+            {"type": "file", "path": None},
+            {"type": [], "path": "ci.yml"},
+            {"type": "unknown", "path": "ci.yml"},
+            {"type": "file", "path": ""},
+        ]:
+            with self.subTest(item=item):
+                self.unexpected_contents = [item]
+                code, stderr = self.invoke("retired", "--owner", "example")
+                self.assertEqual(code, 1)
+                self.assertIn("scan_complete=false", stderr)
+                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+        self.unexpected_contents = None
+        code, _ = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+
+    def test_valid_non_workflow_entries_and_empty_list_are_skipped(self) -> None:
+        for contents in [
+            [],
+            [
+                {"type": "file", "path": ".github/workflows/README.md"},
+                {"type": "dir", "path": ".github/workflows/nested"},
+                {"type": "symlink", "path": ".github/workflows/link.yml"},
+                {"type": "submodule", "path": ".github/workflows/module"},
+            ],
+        ]:
+            with self.subTest(contents=contents):
+                self.unexpected_contents = contents
+                code, stderr = self.invoke("all", "--repo", "example/retired")
+                self.assertEqual(code, 0)
+                self.assertIn("workflows_scanned=0", stderr)
+                self.assertEqual(self.rows("scan-errors"), [])
+
+    def test_non_string_download_url_is_not_cached(self) -> None:
+        self.unexpected_contents = [{"type": "file", "path": ".github/workflows/ci.yml", "download_url": 123}]
+        code, _ = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertTrue(all(row["stage"] == "download" for row in self.rows("scan-errors", "example")))
+        self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_legacy_partial_repos_and_v2_workflows_are_rebuilt(self) -> None:
+        self.cache.mkdir()
+        old_repos = self.cache / "example-repos.jsonl"
+        old_workflows = self.cache / "example-workflow-files-v2.tsv"
+        old_repos.write_text(
+            json.dumps({"full_name": "example/clean", "default_branch": "main"}), encoding="utf-8"
+        )
+        old_workflows.write_text("\t".join(scan.WORKFLOW_FIELDS) + "\n", encoding="utf-8")
+        originals = [path.read_bytes() for path in [old_repos, old_workflows]]
+        code, stderr = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertIn("workflows_scanned=2", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+        self.assertTrue((self.cache / "example-repos-v2.jsonl").exists())
+        self.assertTrue((self.cache / "example-workflow-files-v3.tsv").exists())
+        self.assertEqual([path.read_bytes() for path in [old_repos, old_workflows]], originals)
+
+    def test_interrupted_repo_write_never_publishes_valid_prefix(self) -> None:
+        self.repos.reverse()
+        write_text = Path.write_text
+
+        def interrupt(path, text, *args, **kwargs):
+            if path.parent == self.cache:
+                write_text(path, text.splitlines()[0] + "\n", *args, **kwargs)
+                raise OSError("interrupted repository write")
+            return write_text(path, text, *args, **kwargs)
+
+        with mock.patch.object(Path, "write_text", new=interrupt):
+            code, stderr = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=2", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+        self.assertEqual(list(self.cache.iterdir()), [])
+        code, _ = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+        self.assertEqual(len((self.cache / "example-repos-v2.jsonl").read_text().splitlines()), 2)
+
+    def test_failed_repo_replace_preserves_previous_complete_cache(self) -> None:
+        self.invoke("retired", "--owner", "example")
+        repo_cache = self.cache / "example-repos-v2.jsonl"
+        workflow_cache = self.cache / "example-workflow-files-v3.tsv"
+        originals = [repo_cache.read_bytes(), workflow_cache.read_bytes()]
+        files = set(self.cache.iterdir())
+        self.repos.reverse()
+        replace = scan.os.replace
+
+        def fail_repo_replace(source, target):
+            if target == repo_cache:
+                raise OSError("repository replace failed")
+            return replace(source, target)
+
+        with mock.patch.object(scan.os, "replace", side_effect=fail_repo_replace):
+            code, stderr = self.invoke("retired", "--owner", "example", "--refresh")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=2", stderr)
+        self.assertEqual(self.rows("scan-errors", "example")[0]["path"], repo_cache.name)
+        self.assertEqual([repo_cache.read_bytes(), workflow_cache.read_bytes()], originals)
+        self.assertEqual(set(self.cache.iterdir()), files)
+
+    def test_corrupt_new_repo_cache_is_rebuilt(self) -> None:
+        self.cache.mkdir()
+        cache = self.cache / "example-repos-v2.jsonl"
+        for contents in [b"{", b"\xff", b"null\n", b'{"full_name":"example/clean"}\n']:
+            with self.subTest(contents=contents):
+                cache.write_bytes(contents)
+                repos, errors = scan.load_repos(self.cache, "example", False)
+                self.assertEqual(len(repos), 2)
+                self.assertEqual(errors, [])
+                self.assertEqual(len(cache.read_text().splitlines()), 2)
+
+    def test_bad_org_metadata_preserves_other_repositories(self) -> None:
+        self.org_output = json.dumps({"full_name": "example/retired", "default_branch": "main"}) + "\n{}\n"
+        code, stderr = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+        self.assertEqual(self.rows("scan-errors", "example")[0]["stage"], "metadata")
+        self.assertFalse((self.cache / "example-repos-v2.jsonl").exists())
+        self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_unusable_cache_directory_does_not_discard_enumerated_results(self) -> None:
+        self.cache.write_text("not a directory", encoding="utf-8")
+        code, stderr = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=2", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+        self.assertEqual(self.rows("scan-errors", "example")[0]["stage"], "cache")
+
+    def test_interrupted_workflow_cache_write_preserves_results_and_recovers(self) -> None:
+        write_tsv = scan.write_tsv
+
+        def interrupt(path, rows, fields):
+            if path.parent == self.cache:
+                write_tsv(path, [], fields)
+                raise OSError("interrupted workflow write")
+            return write_tsv(path, rows, fields)
+
+        with mock.patch.object(scan, "write_tsv", side_effect=interrupt):
+            code, stderr = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=2", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+        self.assertEqual([path.name for path in self.cache.iterdir()], ["example-repos-v2.jsonl"])
+        code, _ = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_cache_failure_uses_current_results_not_previous_inventory(self) -> None:
+        self.invoke("retired", "--owner", "example")
+        cache = self.cache / "example-workflow-files-v3.tsv"
+        original = cache.read_bytes()
+        current = self.root / "current.yml"
+        current.write_text(json.dumps({"jobs": {"build": {"runs-on": "ubuntu-24.04"}}}), encoding="utf-8")
+        self.files["example/retired"] = current
+        replace = scan.os.replace
+
+        def fail_workflow_replace(source, target):
+            if target == cache:
+                raise OSError("workflow replace failed")
+            return replace(source, target)
+
+        with mock.patch.object(scan.os, "replace", side_effect=fail_workflow_replace):
+            code, stderr = self.invoke("retired", "--owner", "example", "--refresh")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=2", stderr)
+        self.assertEqual(self.rows("retired-gh-runners-confirmed", "example"), [])
+        self.assertEqual(cache.read_bytes(), original)
+
+    def test_corrupt_new_workflow_cache_is_rebuilt(self) -> None:
+        self.cache.mkdir()
+        cache = self.cache / "example-workflow-files-v3.tsv"
+        header = "\t".join(scan.WORKFLOW_FIELDS) + "\n"
+        documents: list[str | bytes] = [
+            header + "example/clean\tmain\tci.yml\t\n",
+            header + "a\tb\tc\td\te\tf\n",
+            header + '"unterminated',
+            header.encode() + b"\xff",
+        ]
+        for contents in documents:
+            with self.subTest(contents=contents):
+                cache.write_bytes(contents.encode() if isinstance(contents, str) else contents)
+                code, stderr = self.invoke("retired", "--owner", "example")
+                self.assertEqual(code, 0)
+                self.assertIn("workflows_scanned=2", stderr)
+                self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+
+    def test_utf8_response_preserves_non_ascii_workflow_path(self) -> None:
+        self.unexpected_contents = [
+            {
+                "type": "file",
+                "path": ".github/workflows/构建.yml",
+                "download_url": self.files["example/retired"].as_uri(),
+            }
+        ]
+        code, _ = self.invoke("retired", "--repo", "example/retired")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.rows("retired-gh-runners-confirmed")[0]["path"], ".github/workflows/构建.yml")
+
+    def test_utf8_failure_diagnostic_preserves_http_status(self) -> None:
+        response = self.gh_run
+
+        def non_ascii_failure(args, **kwargs):
+            if "/contents/" in args[2]:
+                return self.completed(args, 1, "", "gh: ✓ 请求失败 (HTTP 403)")
+            return response(args, **kwargs)
+
+        self.gh.side_effect = non_ascii_failure
+        code, stderr = self.invoke("retired", "--repo", "example/retired")
+        self.assertEqual(code, 1)
+        self.assertIn("✓ 请求失败 (HTTP 403)", stderr)
+        self.assertEqual(self.rows("scan-errors")[0]["stage"], "workflow-list")
+
+    def test_invalid_utf8_org_response_is_not_cached(self) -> None:
+        response = self.gh_run
+
+        def invalid_response(args, **kwargs):
+            if args[2] == "--paginate":
+                return self.completed(args, 0, b"\xff", b"")
+            return response(args, **kwargs)
+
+        self.gh.side_effect = invalid_response
+        code, stderr = self.invoke("retired", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertIn("invalid UTF-8", stderr)
+        self.assertFalse((self.cache / "example-repos-v2.jsonl").exists())
+
+    def test_invalid_utf8_and_missing_streams_are_structured_prerequisite_errors(self) -> None:
+        self.gh.side_effect = None
+        for code, stdout, stderr in [
+            (0, b"\xff", b""),
+            (0, None, None),
+            (1, None, None),
+            (1, b"", b"\xff"),
+            (1, b"failure", None),
+        ]:
+            with self.subTest(code=code, stdout=stdout, stderr=stderr):
+                self.gh.return_value = self.completed([], code, stdout, stderr)
+                result, summary = self.invoke("retired", "--repo", "example/retired")
+                self.assertEqual(result, 2)
+                self.assertIn("scan_complete=false", summary)
+                self.assertEqual(self.rows("scan-errors")[0]["stage"], "prerequisite")
+
+    def test_malformed_diagnostic_bytes_keep_failure_and_http_status(self) -> None:
+        self.gh.side_effect = lambda args, **kwargs: self.completed(args, 1, b"\xff", b"\xff (HTTP 403)")
+        with self.assertRaises(scan.GhError) as error:
+            scan.run(["gh", "api", "repos/example/retired"])
+        self.assertEqual(error.exception.status, 403)
+        self.assertIn("(HTTP 403)", str(error.exception))
+
+    def test_real_utf8_subprocesses_are_independent_of_parent_locale(self) -> None:
+        self.branch = "feature/中文"
+        response = self.gh_run
+
+        def real_child(args, **kwargs):
+            completed = response(args, **kwargs)
+            stderr = "✓ authentication status\n".encode() if args[1] == "auth" else completed.stderr
+            producer = (
+                f"import sys; sys.stdout.buffer.write({completed.stdout!r}); "
+                f"sys.stderr.buffer.write({stderr!r}); sys.exit({completed.returncode})"
+            )
+            return self.process_run([sys.executable, "-c", producer], **kwargs)
+
+        self.gh.side_effect = real_child
+        code, _ = self.invoke("retired", "--repo", "example/retired")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed")), 1)
+        self.auth_failure = True
+        code, stderr = self.invoke("retired", "--repo", "example/retired")
+        self.assertEqual(code, 2)
+        self.assertIn("✓ authentication status", stderr)
+        self.assertEqual(self.rows("scan-errors")[0]["stage"], "prerequisite")
+
+    def test_all_preserves_retired_findings_when_arch_check_fails(self) -> None:
+        with mock.patch.object(scan, "arch_hits", side_effect=RuntimeError("arch failure")):
+            code, stderr = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=0", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed")), 1)
+        error = self.rows("scan-errors")[0]
+        self.assertEqual(error["stage"], "check")
+        self.assertIn("macos-arch: RuntimeError: arch failure", error["error"])
+
+    def test_all_runs_arch_check_when_retired_check_fails(self) -> None:
+        self.files["example/retired"].write_text(
+            json.dumps(
+                {
+                    "jobs": {
+                        "build": {
+                            "runs-on": "macos-13",
+                            "steps": [{"uses": "actions/setup-python@v6", "with": {"architecture": "arm64"}}],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (
+            mock.patch.object(scan, "retired_hits", side_effect=RuntimeError("retired failure")),
+            mock.patch.object(scan, "fetch_text", wraps=scan.fetch_text) as fetch,
+            mock.patch.object(scan, "yaml_load", wraps=scan.yaml_load) as parse,
+        ):
+            code, stderr = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=0", stderr)
+        self.assertEqual(len(self.rows("macos-setup-action-arch-mismatches")), 1)
+        self.assertIn("retired: RuntimeError: retired failure", self.rows("scan-errors")[0]["error"])
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(parse.call_count, 1)
+
+    def test_single_check_does_not_execute_unselected_check(self) -> None:
+        for command, other in [("retired", "arch_hits"), ("macos-arch", "retired_hits")]:
+            with self.subTest(command=command), mock.patch.object(scan, other) as unselected:
+                code, stderr = self.invoke(command, "--repo", "example/retired")
+                self.assertEqual(code, 0)
+                self.assertIn("workflows_scanned=1", stderr)
+                unselected.assert_not_called()
+
+    def test_check_failure_preserves_other_workflows_and_completion_count(self) -> None:
+        arch = scan.arch_hits
+
+        def fail_one(workflow, data):
+            if workflow["repo"] == "example/retired":
+                raise RuntimeError("one check failed")
+            return arch(workflow, data)
+
+        with mock.patch.object(scan, "arch_hits", side_effect=fail_one):
+            code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertIn("scan_errors=1", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
 
 
 if __name__ == "__main__":

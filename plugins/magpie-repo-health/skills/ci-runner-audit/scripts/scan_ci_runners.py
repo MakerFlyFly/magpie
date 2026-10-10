@@ -28,9 +28,11 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from urllib.request import urlopen
 
 try:
@@ -104,12 +106,19 @@ ERROR_FIELDS = ["repo", "path", "stage", "error", "html_url"]
 
 
 def run(args: list[str]) -> str:
-    completed = subprocess.run(args, capture_output=True, text=True, check=False)
+    completed = subprocess.run(args, capture_output=True, check=False)
     if completed.returncode:
-        diagnostic = completed.stderr.strip() or completed.stdout.strip() or "no diagnostic"
-        status = re.search(r"\(HTTP (\d{3})\)", completed.stderr)
+        stderr = (completed.stderr or b"").decode("utf-8", errors="replace")
+        stdout = (completed.stdout or b"").decode("utf-8", errors="replace")
+        diagnostic = stderr.strip() or stdout.strip() or "no captured diagnostic"
+        status = re.search(r"\(HTTP (\d{3})\)", stderr)
         raise GhError(f"{' '.join(args[:3])}: {diagnostic}", int(status[1]) if status else None)
-    return completed.stdout
+    if completed.stdout is None:
+        raise ScanError(f"{' '.join(args[:3])}: stdout was not captured")
+    try:
+        return completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ScanError(f"{' '.join(args[:3])}: invalid UTF-8 response: {exc}") from exc
 
 
 def gh_json(path: str) -> object:
@@ -146,30 +155,66 @@ def lower_values(value) -> list[str]:
     return [item.strip().lower() for item in flatten(value)]
 
 
-def load_repos(cache_dir: Path, owner: str, refresh: bool) -> list[dict]:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    repo_file = cache_dir / f"{owner}-repos.jsonl"
-    if refresh or not repo_file.exists():
-        output = run(
-            [
-                "gh",
-                "api",
-                "--paginate",
-                f"/orgs/{owner}/repos?per_page=100&type=public",
-                "--jq",
-                ".[] | select(.archived == false) | {full_name, default_branch}",
+def atomic_write(path: Path, writer: Callable[[Path], object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+    try:
+        writer(temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def valid_repo_metadata(repo: object) -> bool:
+    return isinstance(repo, dict) and all(
+        isinstance(repo.get(key), str) and bool(repo[key]) for key in ("full_name", "default_branch")
+    )
+
+
+def load_repos(cache_dir: Path, owner: str, refresh: bool) -> tuple[list[dict], list[dict]]:
+    repo_file = cache_dir / f"{owner}-repos-v2.jsonl"
+    if not refresh:
+        try:
+            cached = [
+                json.loads(line)
+                for line in repo_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
             ]
-        )
-        # Validate the entire response before publishing the repository inventory.
-        repos = [json.loads(line) for line in output.splitlines() if line.strip()]
-        if any(not isinstance(repo, dict) for repo in repos):
-            raise ScanError("Unexpected repository-list response")
-        repo_file.write_text(output, encoding="utf-8")
-        return repos
-    repos = [json.loads(line) for line in repo_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if any(not isinstance(repo, dict) for repo in repos):
-        raise ScanError("Unexpected cached repository-list response")
-    return repos
+            if all(valid_repo_metadata(repo) for repo in cached):
+                return cached, []
+        except (OSError, UnicodeError, ValueError):
+            pass  # An absent or damaged cache must be rebuilt from the API.
+    output = run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"/orgs/{owner}/repos?per_page=100&type=public",
+            "--jq",
+            ".[] | select(.archived == false) | {full_name, default_branch}",
+        ]
+    )
+    response = [json.loads(line) for line in output.splitlines() if line.strip()]
+    repos = []
+    errors = []
+    for repo in response:
+        if valid_repo_metadata(repo):
+            repos.append(repo)
+        else:
+            errors.append(
+                scan_error(
+                    repo if isinstance(repo, dict) else {},
+                    "metadata",
+                    ScanError("Repository metadata must include full_name and default_branch strings"),
+                )
+            )
+    if not errors:
+        try:
+            atomic_write(repo_file, lambda path: path.write_text(output, encoding="utf-8"))
+        except (OSError, UnicodeError) as exc:
+            errors.append(scan_error({"path": repo_file.name}, "cache", exc))
+    return repos, errors
 
 
 def load_repo(full_name: str) -> dict:
@@ -178,7 +223,7 @@ def load_repo(full_name: str) -> dict:
         raise ScanError(f"Unexpected repository metadata for {full_name}")
     if repo.get("archived"):
         return {}
-    if any(not isinstance(repo.get(key), str) or not repo[key] for key in ["full_name", "default_branch"]):
+    if not valid_repo_metadata(repo):
         raise ScanError(f"Repository metadata for {full_name} must include full_name and default_branch")
     return {"full_name": repo.get("full_name"), "default_branch": repo.get("default_branch")}
 
@@ -196,35 +241,69 @@ def scope_key(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "scope"
 
 
-def list_workflows_for_repo(repo: dict) -> list[dict]:
-    full_name = repo.get("full_name")
-    branch = repo.get("default_branch")
-    if not full_name or not branch:
-        raise ScanError("Repository metadata must include full_name and default_branch")
+def workflow_contents(full_name: str, branch: str) -> object:
+    directory = f"repos/{full_name}/contents/.github/workflows?ref="
     try:
-        contents = gh_json(f"repos/{full_name}/contents/.github/workflows?ref={branch}")
+        return gh_json(directory + quote(branch, safe=""))
     except GhError as exc:
-        if exc.status == 404:
-            return []
-        raise
+        if exc.status != 404:
+            raise
+        # A directory 404 can mean an inaccessible repository or an invalid ref.
+        # Resolve the ref, then retry at that immutable commit before accepting absence.
+        try:
+            commit = gh_json(f"repos/{full_name}/commits/{quote(branch, safe='')}")
+            if not isinstance(commit, dict) or not isinstance(commit.get("sha"), str):
+                raise ScanError("Unexpected ref-validation response")
+            sha = commit["sha"]
+            if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+                raise ScanError("Ref-validation response must include a commit SHA")
+        except Exception as validation_error:
+            raise ScanError(f"{exc}; cannot verify ref {branch}: {validation_error}") from validation_error
+        try:
+            return gh_json(directory + sha)
+        except Exception as retry_error:
+            if isinstance(retry_error, GhError) and retry_error.status == 404:
+                return []
+            raise ScanError(f"{exc}; directory retry at {sha} failed: {retry_error}") from retry_error
+
+
+def list_workflows_for_repo(repo: dict) -> tuple[list[dict], list[dict]]:
+    if not valid_repo_metadata(repo):
+        raise ScanError("Repository metadata must include full_name and default_branch strings")
+    full_name = repo["full_name"]
+    branch = repo["default_branch"]
+    contents = workflow_contents(full_name, branch)
     if not isinstance(contents, list):
         raise ScanError(f"Unexpected workflow-list response for {full_name}")
     workflows = []
-    for item in contents:
-        if not isinstance(item, dict):
-            raise ScanError(f"Unexpected workflow-list entry for {full_name}")
-        path = item.get("path", "")
-        if item.get("type") == "file" and re.search(r"\.ya?ml$", path):
+    errors = []
+    for index, item in enumerate(contents):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not item["path"]
+            or item.get("type") not in ("file", "dir", "symlink", "submodule")
+        ):
+            errors.append(
+                scan_error(
+                    {"repo": full_name, "path": item.get("path") if isinstance(item, dict) else ""},
+                    "workflow-list",
+                    ScanError(f"Unexpected workflow-list entry {index}: valid path and type are required"),
+                )
+            )
+            continue
+        path = item["path"]
+        if item["type"] == "file" and re.search(r"\.ya?ml$", path):
             workflows.append(
                 {
                     "repo": full_name,
                     "branch": branch,
                     "path": path,
                     "url": item.get("download_url"),
-                    "html_url": f"https://github.com/{full_name}/blob/{branch}/{path}",
+                    "html_url": f"https://github.com/{full_name}/blob/{quote(branch, safe='')}/{quote(path)}",
                 }
             )
-    return workflows
+    return workflows, errors
 
 
 def collect_workflows(repos: list[dict], workers: int) -> tuple[list[dict], list[dict]]:
@@ -234,32 +313,38 @@ def collect_workflows(repos: list[dict], workers: int) -> tuple[list[dict], list
         futures = {executor.submit(list_workflows_for_repo, repo): repo for repo in repos}
         for future in as_completed(futures):
             try:
-                workflows.extend(future.result())
+                repo_workflows, repo_errors = future.result()
+                workflows.extend(repo_workflows)
+                errors.extend(repo_errors)
             except Exception as exc:
                 errors.append(scan_error(futures[future], "workflow-list", exc))
     return sorted(workflows, key=lambda row: (row["repo"], row["path"])), errors
 
 
 def load_workflows(cache_dir: Path, owner: str, refresh: bool, workers: int) -> tuple[list[dict], list[dict]]:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    # Older inventories may have silently omitted failed repositories.
-    workflow_file = cache_dir / f"{owner}-workflow-files-v2.tsv"
-    if not refresh and workflow_file.exists():
-        with workflow_file.open(newline="", encoding="utf-8") as input_file:
-            reader = csv.DictReader(input_file, delimiter="\t")
-            if reader.fieldnames == WORKFLOW_FIELDS:
-                workflows = list(reader)
-                if all(all(row.get(field) for field in WORKFLOW_FIELDS) for row in workflows):
-                    return workflows, []
-    workflows, errors = collect_workflows(load_repos(cache_dir, owner, refresh), workers)
-    if not errors and all(workflow.get("url") for workflow in workflows):
-        with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False) as temporary:
-            temporary_path = Path(temporary.name)
+    # v1/v2 inventories could have trusted truncated repo lists or ambiguous 404s.
+    workflow_file = cache_dir / f"{owner}-workflow-files-v3.tsv"
+    if not refresh:
         try:
-            write_tsv(temporary_path, workflows, WORKFLOW_FIELDS)
-            os.replace(temporary_path, workflow_file)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+            with workflow_file.open(newline="", encoding="utf-8") as input_file:
+                reader = csv.DictReader(input_file, delimiter="\t", strict=True)
+                if reader.fieldnames == WORKFLOW_FIELDS:
+                    workflows = list(reader)
+                    if all(
+                        set(row) == set(WORKFLOW_FIELDS) and all(row.get(field) for field in WORKFLOW_FIELDS)
+                        for row in workflows
+                    ):
+                        return workflows, []
+        except (OSError, UnicodeError, csv.Error):
+            pass
+    repos, errors = load_repos(cache_dir, owner, refresh)
+    workflows, listing_errors = collect_workflows(repos, workers)
+    errors.extend(listing_errors)
+    if not errors and all(isinstance(workflow.get("url"), str) and workflow["url"] for workflow in workflows):
+        try:
+            atomic_write(workflow_file, lambda path: write_tsv(path, workflows, WORKFLOW_FIELDS))
+        except (OSError, UnicodeError, csv.Error) as exc:
+            errors.append(scan_error({"path": workflow_file.name}, "cache", exc))
     return workflows, errors
 
 
@@ -462,9 +547,9 @@ def arch_hits(workflow: dict, data: object) -> list[dict]:
     return hits
 
 
-def scan_workflow(workflow: dict, command: str) -> tuple[list[dict], list[dict]]:
+def scan_workflow(workflow: dict, command: str) -> tuple[list[dict], list[dict], list[dict]]:
     try:
-        if not workflow.get("url"):
+        if not isinstance(workflow.get("url"), str) or not workflow["url"]:
             raise ScanError("Workflow has no download URL")
         text = fetch_text(workflow["url"])
     except Exception as exc:
@@ -475,10 +560,16 @@ def scan_workflow(workflow: dict, command: str) -> tuple[list[dict], list[dict]]
             raise ScanError("Workflow YAML must contain a mapping")
     except Exception as exc:
         raise ScanError(str(exc), "parse") from exc
-    return (
-        retired_hits(workflow, data) if command in ("retired", "all") else [],
-        arch_hits(workflow, data) if command in ("macos-arch", "all") else [],
-    )
+    results: dict[str, list[dict]] = {"retired": [], "macos-arch": []}
+    errors = []
+    for name, check in (("retired", retired_hits), ("macos-arch", arch_hits)):
+        if command not in (name, "all"):
+            continue
+        try:
+            results[name] = check(workflow, data)
+        except Exception as exc:
+            errors.append(scan_error(workflow, "check", ScanError(f"{name}: {type(exc).__name__}: {exc}")))
+    return results["retired"], results["macos-arch"], errors
 
 
 def parallel_scan(
@@ -492,13 +583,14 @@ def parallel_scan(
         futures = {executor.submit(scan_workflow, workflow, command): workflow for workflow in workflows}
         for future in as_completed(futures):
             try:
-                retired_rows, arch_rows = future.result()
+                retired_rows, arch_rows, check_errors = future.result()
             except Exception as exc:
                 errors.append(scan_error(futures[future], getattr(exc, "stage", "check"), exc))
                 continue
             retired.extend(retired_rows)
             arch.extend(arch_rows)
-            scanned += 1
+            errors.extend(check_errors)
+            scanned += int(not check_errors)
     return sorted_hits(retired), sorted_hits(arch), scanned, errors
 
 
