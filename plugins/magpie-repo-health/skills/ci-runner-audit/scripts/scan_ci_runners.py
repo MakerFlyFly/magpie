@@ -31,10 +31,13 @@ import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import urlopen
+
+if TYPE_CHECKING:
+    from typing import TypeGuard
 
 try:
     import yaml
@@ -224,6 +227,7 @@ def load_repos(
                 return cached, []
         except (OSError, UnicodeError, ValueError):
             pass  # An absent or damaged cache must be rebuilt from the API.
+    print("discovery_stage=repositories", file=sys.stderr, flush=True)
     output = run(
         [
             "gh",
@@ -397,7 +401,7 @@ def workflow_query(repos: list[dict]) -> str:
     return "query { " + " ".join(selections) + " }"
 
 
-def valid_graphql_response(response: object, *, partial: bool = False) -> bool:
+def valid_graphql_response(response: object, *, partial: bool = False) -> TypeGuard[dict]:
     if not isinstance(response, dict) or "data" not in response:
         return False
     errors = response.get("errors", [])
@@ -412,6 +416,60 @@ def valid_graphql_response(response: object, *, partial: bool = False) -> bool:
     )
 
 
+def is_rate_limited(response: object = None, failure: ScanError | None = None) -> bool:
+    if isinstance(failure, GraphQLResponseError):
+        return failure.rate_limited
+    if isinstance(failure, GhError) and failure.status == 429:
+        return True
+    messages = [failure.diagnostic] if isinstance(failure, GhError) else []
+    if isinstance(response, dict):
+        if isinstance(response.get("message"), str):
+            messages.append(response["message"])
+        errors = response.get("errors")
+        if isinstance(errors, list):
+            for error in errors:
+                if not isinstance(error, dict):
+                    continue
+                if error.get("type") == "RATE_LIMITED":
+                    return True
+                if isinstance(error.get("message"), str):
+                    messages.append(error["message"])
+    # Only provider error diagnostics qualify; repository data is never searched.
+    return any(
+        re.match(
+            r"^(?:gh:\s*)?(?:GraphQL:\s*)?(?:api rate limit exceeded\b|"
+            r"you have exceeded (?:a |the )?(?:secondary|primary) rate limit\b)",
+            line.strip(),
+            re.IGNORECASE,
+        )
+        for message in messages
+        for line in message.splitlines()
+    )
+
+
+class GraphQLResponseError(ScanError):
+    """A GraphQL response failure, retaining diagnostics and limit state."""
+
+    def __init__(
+        self,
+        response: object,
+        failure: GhError | None = None,
+        *,
+        message: str = "Unexpected GraphQL response: expected data and an optional errors list",
+    ) -> None:
+        messages = [message]
+        if isinstance(response, dict):
+            if isinstance(response.get("message"), str):
+                messages.append(response["message"])
+            errors = response.get("errors")
+            if isinstance(errors, list):
+                messages.extend(str(graphql_error(error, "")) for error in errors if isinstance(error, dict))
+        if failure is not None:
+            messages.append(str(failure))
+        super().__init__("; ".join(messages))
+        self.rate_limited = is_rate_limited(response, failure)
+
+
 def graphql_response(query: str, api_timeout: int) -> tuple[dict, GhError | None]:
     failure = None
     try:
@@ -424,13 +482,12 @@ def graphql_response(query: str, api_timeout: int) -> tuple[dict, GhError | None
         except (UnicodeError, ValueError):
             raise exc from None
         if not valid_graphql_response(response, partial=True):
-            raise
+            raise GraphQLResponseError(response, exc) from exc
         failure = exc
     else:
         response = json.loads(output)
     if not valid_graphql_response(response):
-        raise ScanError("Unexpected GraphQL response: expected data and an optional errors list")
-    assert isinstance(response, dict)
+        raise GraphQLResponseError(response)
     return response, failure
 
 
@@ -440,18 +497,38 @@ def graphql_error(error: dict, diagnostic: str) -> ScanError:
     return ScanError(f"{message}; {diagnostic}" if diagnostic else message)
 
 
+class RepositoryInventory(NamedTuple):
+    repo: str
+    branch: str | None
+    commit_sha: str | None
+    workflows: list[dict]
+    errors: list[dict]
+    absent_error_indexes: frozenset[int]
+
+
 def graphql_workflows(
-    repo: dict, node: object, alias: str, api_errors: list[dict]
-) -> tuple[list[dict], list[dict]]:
+    repo: dict, node: object, alias: str, api_errors: list[dict], owner: str | None = None
+) -> RepositoryInventory:
     full_name = repo["full_name"]
     if (
         not isinstance(node, dict)
-        or node.get("nameWithOwner") != full_name
+        or not isinstance(node.get("nameWithOwner"), str)
+        or len(node["nameWithOwner"].split("/")) != 2
+        or not all(node["nameWithOwner"].split("/"))
         or not isinstance(node.get("isEmpty"), bool)
     ):
         raise ScanError(f"Unexpected GraphQL repository metadata for {full_name}")
+    canonical = node["nameWithOwner"]
+    expected_owner = owner if owner is not None else full_name.split("/", 1)[0]
+    if canonical.split("/", 1)[0].casefold() != expected_owner.casefold():
+        raise ScanError(
+            f"Repository {full_name} resolved to {canonical}, outside owner {expected_owner}; "
+            "use --refresh to update the organization inventory"
+        )
+    full_name = canonical
+    source = {"repo": canonical}
     if node["isEmpty"]:
-        return [], []
+        return RepositoryInventory(canonical, None, None, [], [], frozenset())
     ref = node.get("defaultBranchRef")
     if not isinstance(ref, dict) or not isinstance(ref.get("name"), str) or not ref["name"]:
         raise ScanError(f"GraphQL defaultBranchRef is missing or invalid for {full_name}")
@@ -467,8 +544,13 @@ def graphql_workflows(
     directory = commit["workflowDir"]
     if directory is None:
         expected = [alias, "defaultBranchRef", "target", "workflowDir"]
-        if any(error.get("type") == "NOT_FOUND" and error.get("path") == expected for error in api_errors):
-            return [], []
+        absent_errors = frozenset(
+            index
+            for index, error in enumerate(api_errors)
+            if error.get("type") == "NOT_FOUND" and error.get("path") == expected
+        )
+        if absent_errors:
+            return RepositoryInventory(canonical, ref["name"], commit["oid"], [], [], absent_errors)
         raise ScanError(
             f"GraphQL workflow directory is null without matching NOT_FOUND evidence for {full_name}"
         )
@@ -500,7 +582,9 @@ def graphql_workflows(
             or entry["mode"] not in modes[entry["type"]]
         ):
             errors.append(
-                scan_error(repo, "workflow-list", ScanError(f"Invalid GraphQL Tree entry {index}: {entry!r}"))
+                scan_error(
+                    source, "workflow-list", ScanError(f"Invalid GraphQL Tree entry {index}: {entry!r}")
+                )
             )
             continue
         if entry["type"] != "blob" or entry["mode"] not in (0o100644, 0o100755):
@@ -516,10 +600,12 @@ def graphql_workflows(
                     "html_url": f"https://github.com/{full_name}/blob/{quote(branch, safe='')}/{quote(path)}",
                 }
             )
-    return workflows, errors
+    return RepositoryInventory(canonical, branch, commit["oid"], workflows, errors, frozenset())
 
 
-def collect_org_workflows(repos: list[dict], api_timeout: int = 60) -> tuple[list[dict], list[dict]]:
+def collect_org_workflows(
+    repos: list[dict], api_timeout: int = 60, owner: str | None = None
+) -> tuple[list[dict], list[dict]]:
     workflows: list[dict] = []
     errors: list[dict] = []
     valid_repos = []
@@ -537,27 +623,26 @@ def collect_org_workflows(repos: list[dict], api_timeout: int = 60) -> tuple[lis
                 )
             )
     repos = valid_repos
+    snapshots: dict[str, tuple[str | None, str | None]] = {}
+    seen: set[tuple[str, str]] = set()
+    batch_count = (len(repos) + GRAPHQL_BATCH_SIZE - 1) // GRAPHQL_BATCH_SIZE
     for offset in range(0, len(repos), GRAPHQL_BATCH_SIZE):
         batch = repos[offset : offset + GRAPHQL_BATCH_SIZE]
+        error_start = len(errors)
         limited = False
         try:
             response, failure = graphql_response(workflow_query(batch), api_timeout)
         except Exception as exc:
             errors.extend(scan_error(repo, "workflow-list", exc) for repo in batch)
-            limited = isinstance(exc, GhError) and (
-                exc.status == 429 or (exc.status == 403 and "rate limit" in exc.diagnostic.lower())
-            )
+            limited = isinstance(exc, ScanError) and is_rate_limited(failure=exc)
         else:
             diagnostic = str(failure) if failure else ""
-            if failure is not None and failure.status is not None:
+            limited = is_rate_limited(response, failure)
+            if failure is not None and (failure.status is not None or limited):
                 # HTTP failures remain failures even if every field error is normal absence.
                 errors.append(scan_error({}, "workflow-list", failure))
-                limited = failure.status == 429 or (
-                    failure.status == 403 and "rate limit" in failure.diagnostic.lower()
-                )
             by_alias: dict[str, list[dict]] = {f"r{index}": [] for index in range(len(batch))}
             for error in response.get("errors", []):
-                limited |= error.get("type") == "RATE_LIMITED"
                 path = error.get("path")
                 if isinstance(path, list) and path and isinstance(path[0], str) and path[0] in by_alias:
                     by_alias[path[0]].append(error)
@@ -568,29 +653,51 @@ def collect_org_workflows(repos: list[dict], api_timeout: int = 60) -> tuple[lis
                 api_errors = by_alias[alias]
                 node = (response["data"] or {}).get(alias)
                 try:
-                    rows, entry_errors = graphql_workflows(repo, node, alias, api_errors)
+                    inventory = graphql_workflows(repo, node, alias, api_errors, owner)
                 except ScanError as exc:
                     if node is not None or not api_errors:
                         errors.append(scan_error(repo, "workflow-list", exc))
-                    rows = []
-                    absent = False
-                else:
-                    # graphql_workflows has already validated the repository/ref/Commit.
-                    absent = (
-                        isinstance(node, dict)
-                        and not node["isEmpty"]
-                        and node["defaultBranchRef"]["target"]["workflowDir"] is None
-                    )
-                    errors.extend(entry_errors)
-                for error in api_errors:
-                    if (
-                        absent
-                        and error.get("type") == "NOT_FOUND"
-                        and error.get("path") == [alias, "defaultBranchRef", "target", "workflowDir"]
-                    ):
+                    inventory = None
+                for error_index, error in enumerate(api_errors):
+                    if inventory is not None and error_index in inventory.absent_error_indexes:
                         continue
                     errors.append(scan_error(repo, "workflow-list", graphql_error(error, diagnostic)))
-                workflows.extend(rows)
+                if inventory is not None:
+                    errors.extend(inventory.errors)
+                    key = inventory.repo.casefold()
+                    snapshot = (
+                        inventory.branch,
+                        inventory.commit_sha.lower() if inventory.commit_sha else None,
+                    )
+                    if key in snapshots and snapshots[key] != snapshot:
+                        errors.append(
+                            scan_error(
+                                repo,
+                                "workflow-list",
+                                ScanError(
+                                    f"Conflicting branch/Commit inventories for {inventory.repo}; keeping the first inventory"
+                                ),
+                            )
+                        )
+                        continue
+                    snapshots[key] = snapshot
+                    for row in inventory.workflows:
+                        file_key = (key, row["path"])
+                        if file_key not in seen:
+                            seen.add(file_key)
+                            workflows.append(row)
+            if limited and len(errors) == error_start:
+                # Even a last batch with otherwise normal absence must retain the limit failure.
+                errors.append(
+                    scan_error(
+                        {},
+                        "workflow-list",
+                        GraphQLResponseError(response, failure, message="GraphQL rate limit reached"),
+                    )
+                )
+        print(
+            f"discovery_batch={offset // GRAPHQL_BATCH_SIZE + 1}/{batch_count}", file=sys.stderr, flush=True
+        )
         if limited:
             errors.extend(
                 scan_error(
@@ -618,16 +725,23 @@ def load_workflows(
                 if reader.fieldnames == WORKFLOW_FIELDS:
                     workflows = list(reader)
                     if all(
-                        set(row) == set(WORKFLOW_FIELDS)
-                        and all(row.get(field) for field in WORKFLOW_FIELDS)
-                        and valid_download_url(row.get("url"))
+                        set(row) == set(WORKFLOW_FIELDS) and all(row.get(field) for field in WORKFLOW_FIELDS)
                         for row in workflows
                     ):
-                        return workflows, [], True
+                        branches: dict[str, str] = {}
+                        unique: dict[tuple[str, str], dict] = {}
+                        for row in workflows:
+                            key = row["repo"].casefold()
+                            if key in branches and branches[key] != row["branch"]:
+                                break  # A conflicting saved inventory must be rebuilt.
+                            branches[key] = row["branch"]
+                            unique.setdefault((key, row["path"]), row)
+                        else:
+                            return list(unique.values()), [], True
         except (OSError, UnicodeError, csv.Error):
             pass  # Rebuild unreadable or invalid workflow inventories below.
     repos, errors = load_repos(cache_dir, owner, refresh, pagination_timeout)
-    workflows, listing_errors = collect_org_workflows(repos, api_timeout)
+    workflows, listing_errors = collect_org_workflows(repos, api_timeout, owner)
     errors.extend(listing_errors)
     if not errors and all(valid_download_url(workflow.get("url")) for workflow in workflows):
         try:

@@ -104,22 +104,15 @@ grouped, prioritised report → wait for confirmation before any write.
   Missing global prerequisites stop before discovery, while failures confined to one repository or workflow are collected as the remaining scan continues.
   Repository v2 and workflow v3 inventories are cached atomically only after complete, valid enumeration; older unverified inventories are rebuilt automatically.
   Cache persistence failures keep in-memory results usable while the scan reports incomplete.
-  Explicit repositories retain REST directory enumeration: a directory 404 is empty only after ref verification and a second 404 at the resolved commit SHA, or ref verification explicitly confirms an empty Git repository via HTTP 409; other conflicts, invalid refs and malformed entries are errors.
-  Organization repository discovery remains REST-paginated; workflow directories are queried sequentially in GraphQL batches of at most 50 repositories from each current default-branch Commit.
-  `isEmpty=true` confirms empty repositories; non-empty repositories have no directory only when a valid Commit has an explicit null directory field and an exactly matching `NOT_FOUND` error path.
-  Missing fields, unexplained nulls, invalid refs and unknown errors make enumeration incomplete; structured partial GraphQL responses preserve valid aliases and entries despite a non-zero CLI status.
-  Only regular blob YAML entries are scanned; directories, symlinks and submodules are excluded, and download/evidence URLs retain default-branch semantics rather than pinning workflow content to a Commit.
-  Rate limits stop further batches and identify the unqueried repositories without retries or mass REST fallback.
-  Subprocess responses use strict UTF-8 decoding, with tolerant failure diagnostics and structured errors for missing streams.
-  Explicit repository files require UTF-8 with an optional BOM; inputs are resolved before other prerequisites so readable scopes retain consistent output prefixes on failure.
-  Invalid input encoding stops before authentication with exit `2`, zero scanned workflows, and an error TSV, without treating older findings as current results.
-  Active-account authentication falls back to hostname checks only when an older `gh` explicitly rejects `--active`; other auth failures stop the scan.
-  Only download HTTP 404s from an actually reused, valid workflow inventory suggest `--refresh`; fresh enumeration, damaged-cache rebuilds and failed refreshes are not cache hits.
-  Cache-only failures explicitly report that all enumerated workflows were checked but the invocation is incomplete because persistence failed.
-  Original multiline diagnostics are preserved and paginated errors include their endpoint.
-  Positive integer `gh` timeouts default to 30 seconds per authentication command, 60 per metadata/directory command and 300 for complete repository pagination, without imposing a whole-audit deadline.
-  Timeouts become structured errors and never trigger old-client authentication fallback or successful partial-stdout parsing; auth timeouts exit `2`, global org-pagination failures terminate discovery, and local or batch failures preserve other results.
-  Static retired-runner checks avoid unused matrix expansion while retaining strategy structure validation and the existing runner classification rules.
+  REST and batched GraphQL discovery require explicit evidence for empty repositories or absent workflow directories; malformed metadata, invalid refs and unexplained nulls are errors.
+  Organization enumeration accepts same-owner canonical renames, excludes cross-owner transfers, and deduplicates aliases and case-sensitive paths; conflicting branch/Commit inventories retain the first inventory and report incomplete coverage.
+  Valid workflow-cache hits keep their saved scope without current-owner probes; manual refresh updates repository membership and workflow inventory.
+  Structured partial responses preserve valid repositories and entries, but HTTP failures and final-batch rate limits remain errors. Limits stop later requests and identify unqueried repositories without automatic retry or REST fallback.
+  Only regular YAML workflow files are scanned; download and evidence URLs retain default-branch semantics. Progress reports attempted discovery batches separately from checked-file and completion counts.
+  UTF-8 responses, optional-BOM repository inputs, original diagnostics and structured encoding/stream failures preserve consistent scope prefixes; invalid inputs and unavailable prerequisites stop before scanning with exit `2` and an error TSV.
+  Authentication compatibility falls back only for an explicitly unsupported active-account flag. Phase deadlines produce structured errors; global discovery failures stop enumeration, while local failures retain other results. Timeout stdout cannot become successful data.
+  Only actual download 404s from reused valid workflow inventories suggest refresh. Cache-only failures state that all enumerated workflows were checked while persistence made the invocation incomplete.
+  Static runner checks avoid unused matrix expansion while preserving strategy validation and runner classification. Provider details, cache formats and command budgets live in the [scanner README](../../../plugins/magpie-repo-health/skills/ci-runner-audit/scripts/README.md).
   `workflow-security-audit`
   keeps zizmor's error output visible; a repository whose scan exits with
   an unexpected non-zero status is listed as a scan failure with that

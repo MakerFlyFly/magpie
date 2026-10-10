@@ -5,12 +5,13 @@
 
 Behavioral evals for the `ci-runner-audit` skill.
 
-## Suites (23 cases total)
+## Suites (29 cases total)
 
 | Suite | Step | Cases | What it covers |
 |---|---|---|---|
 | step-scope-selection | Scope selection and command choice | 4 | explicit repo, ambiguous Apache project, full-org scan, prompt injection ignored |
 | step-reporting | Reporting discipline | 19 | high-confidence vs broad candidates, CI-risk language, incomplete scans, prerequisite and input-encoding failures, consistent failure prefixes, confirmed empty repositories, stale-inventory hints, unknown completeness, invalid refs, malformed entries, cache failures, partial checks |
+| step-reporting-scope | Inventory scope and coverage | 6 | canonical renames, cross-owner transfers, conflicting aliases, unqueried scope after limits, final-batch limits, saved snapshot scope |
 
 ## Run
 
@@ -53,3 +54,9 @@ Resolving a repo-file scope before authentication gives matching error and findi
 
 GraphQL partial success and unexplained directory nulls retain incomplete reporting; a directory-batch timeout preserves later successful findings without becoming a whole-audit deadline.
 Cache-only failures distinguish completed workflow coverage from an incomplete invocation, including zero-finding audits.
+
+### step-reporting-scope
+
+Reports use canonical names for successful same-owner renames and identify cross-owner transfers or conflicting inventories as scope failures.
+Rate-limit progress does not prove complete coverage, and a limit in the final batch still makes the invocation incomplete.
+A complete audit using a saved workflow inventory reports that snapshot's scope without claiming current organization membership was checked.

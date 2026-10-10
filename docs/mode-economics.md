@@ -110,10 +110,10 @@ stay silent on `ok`, follow the rules a finding carries, and never run
 `/magpie-setup adopt` unattended. What is left in neither is the
 arithmetic, which is now tested rather than graded.
 
-A separate `ci-runner-audit` measurement on 2026-10-10 records the scanner-documentation split.
-The review baseline was 3,124 full-file tokens; the batch-discovery and timeout behavior documentation raised it to 3,472 before the split.
-Moving compatibility and inventory details verbatim into the optional [scanner README](../plugins/magpie-repo-health/skills/ci-runner-audit/scripts/README.md) reduced that full-file figure to 2,909.
-The body excluding the shared pre-flight block fell from 2,500 to 1,937 tokens; `description` plus `when_to_use` remained 141.
+A separate `ci-runner-audit` measurement on 2026-10-10 compares the upstream skill with the scanner reliability update.
+The full-file cost increases from 2,295 to 3,040 tokens; the body excluding the shared pre-flight block increases from 1,323 to 2,068.
+The added context covers completion and failure reporting, phase deadlines, input compatibility and inventory scope; `description` plus `when_to_use` stays at 141 tokens.
+Compatibility and inventory implementation details live in the optional [scanner README](../plugins/magpie-repo-health/skills/ci-runner-audit/scripts/README.md).
 These are file-load measurements, not whole-session costs: the detail file is paid for only when its compatibility or inventory rules are needed.
 Commands, prerequisites, completion checks and mandatory reporting rules remain in `SKILL.md`.
 The earlier pre-flight measurements above remain historical observations.

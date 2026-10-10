@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 2909
+measured_tokens: 3040
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -267,6 +267,10 @@ Report findings in this order:
 Check the command's exit status, `scan_complete`, and `scan_errors` before interpreting the findings.
 If the exit status is non-zero, `scan_complete=false`, or `scan_errors>0`, report the audit as incomplete, include the failure count and available error context, and identify successful findings as partial results.
 When all errors are at stage `cache`, state that every enumerated workflow was checked and the invocation is incomplete because cache persistence failed.
+For organization discovery, report canonical names for same-owner renames; identify cross-owner transfers and conflicting alias inventories as scope failures, with successful findings retained as partial results.
+Findings checked from the first valid inventory remain reportable when a conflicting alias is rejected; the scope failure does not invalidate those successful checks.
+Report rate-limited batches and unqueried repositories as incomplete, including a limit in the final batch. Discovery progress counts attempted batches, not checked workflows or complete coverage.
+State whether refresh was requested and whether a valid saved inventory was reused. A failed refresh reports its partial discovery separately from cache publication; a reused valid inventory represents its saved scope.
 Never describe an incomplete audit as clean or claim the scope has no issues, even when its findings TSVs are empty.
 Report a clean scan only when the command succeeded, `scan_complete=true`, `scan_errors=0`, and there are no findings.
 When completion evidence is missing, state that completeness is unknown.

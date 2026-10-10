@@ -422,12 +422,10 @@ class ScanTest(unittest.TestCase):
         self.assertFalse(self.cache.exists())
 
     def test_modern_auth_checks_only_the_active_account(self) -> None:
-        response = self.gh_run
-
         def inactive_account_failure(args, **kwargs):
-            if args[1:3] == ["auth", "status"] and "--active" not in args:
+            if "--active" not in args:
                 return self.completed(args, 1, "", "inactive account has invalid credentials")
-            return response(args, **kwargs)
+            return self.completed(args, 0)
 
         self.override_gh("auth", inactive_account_failure)
         code, _ = self.invoke("all", "--repo", "example/retired")
@@ -437,12 +435,10 @@ class ScanTest(unittest.TestCase):
         self.assertIn("--active", auth[0])
 
     def test_legacy_auth_retries_only_the_unsupported_active_flag(self) -> None:
-        response = self.gh_run
-
         def legacy_auth(args, **kwargs):
-            if args[1:3] == ["auth", "status"] and "--active" in args:
+            if "--active" in args:
                 return self.completed(args, 1, "", "unknown flag: --active\n\nUsage: gh auth status")
-            return response(args, **kwargs)
+            return self.completed(args, 0)
 
         self.override_gh("auth", legacy_auth)
         code, stderr = self.invoke("all", "--repo", "example/retired")
@@ -575,7 +571,6 @@ class ScanTest(unittest.TestCase):
 
     def test_conflicts_or_permission_errors_are_not_empty_repositories(self) -> None:
         self.list_failures = {"example/retired": 404}
-        response = self.gh_run
         cases = [
             (409, message)
             for message in ["Conflict", "not Git Repository is empty.", "Git Repository is empty. maybe"]
@@ -585,9 +580,7 @@ class ScanTest(unittest.TestCase):
             with self.subTest(status=status, message=message):
 
                 def invalid_verification(args, *, message=message, status=status, **kwargs):
-                    if "/commits/" in self.gh_request(args).endpoint:
-                        return self.completed(args, 1, "", f"gh: {message} (HTTP {status})")
-                    return response(args, **kwargs)
+                    return self.completed(args, 1, "", f"gh: {message} (HTTP {status})")
 
                 self.override_gh("commit", invalid_verification)
                 code, stderr = self.invoke("all", "--repo", "example/retired", "--repo", "example/clean")
@@ -1166,12 +1159,8 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(self.rows("retired-gh-runners-confirmed")[0]["path"], ".github/workflows/构建.yml")
 
     def test_utf8_failure_diagnostic_preserves_http_status(self) -> None:
-        response = self.gh_run
-
         def non_ascii_failure(args, **kwargs):
-            if "/contents/" in self.gh_request(args).endpoint:
-                return self.completed(args, 1, "", "gh: ✓ 请求失败 (HTTP 403)")
-            return response(args, **kwargs)
+            return self.completed(args, 1, "", "gh: ✓ 请求失败 (HTTP 403)")
 
         self.override_gh("contents", non_ascii_failure)
         code, stderr = self.invoke("retired", "--repo", "example/retired")
@@ -1180,12 +1169,8 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(self.rows("scan-errors")[0]["stage"], "workflow-list")
 
     def test_invalid_utf8_org_response_is_not_cached(self) -> None:
-        response = self.gh_run
-
         def invalid_response(args, **kwargs):
-            if self.gh_request(args).kind == "repositories":
-                return self.completed(args, 0, b"\xff", b"")
-            return response(args, **kwargs)
+            return self.completed(args, 0, b"\xff", b"")
 
         self.override_gh("repositories", invalid_response)
         code, stderr = self.invoke("retired", "--owner", "example")
@@ -1847,6 +1832,322 @@ class ScanTest(unittest.TestCase):
                 self.assertIn(f"transport failed (HTTP {status})", stderr)
                 self.assertIn("scan_errors=1", stderr)
                 self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_same_owner_rename_uses_canonical_name_and_urls(self) -> None:
+        self.repos = ["example/retired"]
+        self.graphql_nodes[self.repos[0]] = self.tree_node("Example/renamed")
+        self.files["Example/renamed"] = self.files[self.repos[0]]
+        code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertIn("workflows_scanned=1", stderr)
+        row = self.rows("retired-gh-runners-confirmed", "example")[0]
+        self.assertEqual(row["repo"], "Example/renamed")
+        self.assertIn("/Example/renamed/blob/main/", row["html_url"])
+        with (self.cache / "example-workflow-files-v3.tsv").open(encoding="utf-8") as source:
+            cached = next(csv.DictReader(source, delimiter="\t"))
+        self.assertIn("/Example/renamed/main/", cached["url"])
+
+    def test_cross_owner_transfer_is_out_of_scope_even_when_empty(self) -> None:
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                node = self.tree_node("outside/retired")
+                node["isEmpty"] = empty
+                self.graphql_nodes["example/retired"] = node
+                code, stderr = self.invoke("all", "--owner", "example", "--refresh")
+                self.assertEqual(code, 1)
+                self.assertIn("workflows_scanned=1", stderr)
+                error = self.rows("scan-errors", "example")[0]
+                self.assertEqual(error["repo"], "example/retired")
+                for text in ("outside/retired", "outside owner example", "--refresh"):
+                    self.assertIn(text, error["error"])
+                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_org_scope_uses_declared_owner_not_cached_requested_owner(self) -> None:
+        repos = [{"full_name": "outside/old"}]
+        self.graphql_nodes["outside/old"] = self.tree_node("outside/new")
+        workflows, errors = scan.collect_org_workflows(repos, owner="example")
+        self.assertEqual(workflows, [])
+        self.assertIn("outside owner example", errors[0]["error"])
+
+    def test_malformed_canonical_names_do_not_hide_successful_peers(self) -> None:
+        for name in (None, 123, "missing-owner", "/repo", "example/", "example/repo/extra"):
+            with self.subTest(name=name):
+                node = self.tree_node("example/retired")
+                node["nameWithOwner"] = name
+                self.graphql_nodes["example/retired"] = node
+                code, stderr = self.invoke("all", "--owner", "example", "--refresh")
+                self.assertEqual(code, 1)
+                self.assertIn("workflows_scanned=1", stderr)
+                self.assertIn("repository metadata", stderr)
+
+    def test_duplicate_aliases_download_and_parse_once(self) -> None:
+        self.repos = ["example/retired", "example/legacy"]
+        self.graphql_nodes["example/legacy"] = self.tree_node("example/retired")
+        with (
+            mock.patch.object(scan, "fetch_text", wraps=scan.fetch_text) as fetch,
+            mock.patch.object(scan, "yaml_load", wraps=scan.yaml_load) as parse,
+        ):
+            code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(parse.call_count, 1)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+
+    def test_alias_dedup_spans_batches_and_preserves_path_case(self) -> None:
+        names = ["example/retired"] + [f"example/repo{i}" for i in range(49)] + ["example/legacy"]
+        entries = [{"name": name, "type": "blob", "mode": 0o100644} for name in ("ci.yml", "CI.yml")]
+        self.graphql_nodes["example/legacy"] = self.tree_node("Example/Retired", entries)
+        workflows, errors = scan.collect_org_workflows([{"full_name": name} for name in names])
+        self.assertEqual(errors, [])
+        self.assertEqual(len(workflows), 51)
+        self.assertEqual(self.gh.call_count, 2)
+        paths = [row["path"] for row in workflows if row["repo"].casefold() == "example/retired"]
+        self.assertCountEqual(paths, [".github/workflows/ci.yml", ".github/workflows/CI.yml"])
+
+    def test_alias_inventory_conflicts_keep_first_and_prevent_cache(self) -> None:
+        self.repos = ["example/retired", "example/legacy", "example/clean"]
+        for changed in ("branch", "sha", "empty"):
+            with self.subTest(changed=changed):
+                node = self.tree_node("example/retired")
+                if changed == "branch":
+                    node["defaultBranchRef"]["name"] = "other"
+                elif changed == "sha":
+                    node["defaultBranchRef"]["target"]["oid"] = "b" * 40
+                else:
+                    node["isEmpty"] = True
+                self.graphql_nodes["example/legacy"] = node
+                code, stderr = self.invoke("all", "--owner", "example", "--refresh")
+                self.assertEqual(code, 1)
+                self.assertIn("workflows_scanned=2", stderr)
+                self.assertIn("Conflicting branch/Commit inventories", stderr)
+                self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_duplicate_success_cannot_erase_alias_errors(self) -> None:
+        self.repos = ["example/retired", "example/legacy"]
+        node = self.tree_node("example/retired")
+        node["defaultBranchRef"]["target"]["workflowDir"]["object"]["entries"].append({"name": "bad.yml"})
+        self.graphql_nodes["example/legacy"] = node
+        code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 1)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertIn("Invalid GraphQL Tree entry", stderr)
+        self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_no_data_limit_envelopes_stop_and_preserve_diagnostics(self) -> None:
+        repos = [{"full_name": f"example/repo{i}"} for i in range(101)]
+        messages = (
+            {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]},
+            {"message": "You have exceeded a secondary rate limit. Please wait."},
+        )
+        for payload in messages:
+            for code in (0, 1):
+                with self.subTest(payload=payload, code=code):
+                    self.gh.reset_mock()
+                    count = 0
+
+                    def limited(args, *, code=code, payload=payload, **kwargs):
+                        nonlocal count
+                        count += 1
+                        if count == 2:
+                            return self.completed(args, code, json.dumps(payload), "gh: original diagnostic")
+                        return self.gh_run(args, **kwargs)
+
+                    self.override_gh("graphql", limited)
+                    with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                        workflows, errors = scan.collect_org_workflows(repos)
+                    self.assertEqual(count, 2)
+                    self.assertEqual(len(workflows), 50)
+                    self.assertEqual(len(errors), 51)
+                    self.assertIn("rate limit", errors[0]["error"].lower())
+                    self.assertNotIn("HTTP 429", errors[0]["error"])
+                    if code:
+                        self.assertIn("original diagnostic", errors[0]["error"])
+                    self.assertIn("Not queried", errors[-1]["error"])
+                    self.assertEqual(
+                        stderr.getvalue().splitlines(), ["discovery_batch=1/3", "discovery_batch=2/3"]
+                    )
+
+    def test_last_batch_limits_are_errors_and_cannot_publish_cache(self) -> None:
+        self.repos = ["example/retired"]
+        for payload in (
+            {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]},
+            {"message": "You have exceeded a secondary rate limit. Please wait."},
+        ):
+            with self.subTest(payload=payload):
+                self.override_graphql(payload)
+                code, stderr = self.invoke("all", "--owner", "example", "--refresh")
+                self.assertEqual(code, 1)
+                self.assertIn("workflows_scanned=0", stderr)
+                self.assertIn("rate limit", stderr.lower())
+                self.assertEqual(len(self.rows("scan-errors", "example")), 1)
+                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_normal_absence_cannot_absorb_diagnostic_only_limit(self) -> None:
+        self.repos = ["example/retired"]
+        node = self.tree_node(self.repos[0])
+        node["defaultBranchRef"]["target"]["workflowDir"] = None
+        payload = {
+            "data": {"r0": node},
+            "errors": [
+                {
+                    "type": "NOT_FOUND",
+                    "message": "missing directory",
+                    "path": ["r0", "defaultBranchRef", "target", "workflowDir"],
+                }
+            ],
+        }
+        for code in (0, 1):
+            with self.subTest(code=code):
+                response = copy.deepcopy(payload)
+                diagnostic = "gh: API rate limit exceeded"
+                if not code:
+                    response["message"] = "You have exceeded a secondary rate limit."
+                self.override_graphql(response, code, diagnostic)
+                result, stderr = self.invoke("all", "--owner", "example", "--refresh")
+                self.assertEqual(result, 1)
+                self.assertIn("scan_errors=1", stderr)
+                self.assertIn("rate limit", stderr.lower())
+                self.assertNotIn("Unexpected GraphQL response", stderr)
+                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_rate_limit_words_in_business_data_and_ordinary_errors_do_not_stop(self) -> None:
+        repos = [{"full_name": f"example/repo{i}"} for i in range(51)]
+        node = self.tree_node("example/repo0", branch="API rate limit exceeded")
+        self.graphql_nodes["example/repo0"] = node
+        workflows, errors = scan.collect_org_workflows(repos)
+        self.assertEqual(len(workflows), 51)
+        self.assertEqual(errors, [])
+        self.gh.reset_mock()
+        count = 0
+
+        def ordinary_error(args, **kwargs):
+            nonlocal count
+            count += 1
+            if count == 1:
+                return self.completed(args, 0, json.dumps({"message": "Configure rate limit settings"}))
+            return self.gh_run(args, **kwargs)
+
+        self.override_gh("graphql", ordinary_error)
+        workflows, errors = scan.collect_org_workflows(repos)
+        self.assertEqual(count, 2)
+        self.assertEqual(len(workflows), 1)
+        self.assertEqual(len(errors), 50)
+        self.assertIn("Configure rate limit settings", errors[0]["error"])
+        self.assertFalse(any("Not queried" in error["error"] for error in errors))
+
+    def test_timeout_rate_limit_stdout_is_not_a_response(self) -> None:
+        repos = [{"full_name": f"example/repo{i}"} for i in range(51)]
+        count = 0
+
+        def timed_out(args, **kwargs):
+            nonlocal count
+            count += 1
+            if count == 1:
+                raise subprocess.TimeoutExpired(
+                    args,
+                    1,
+                    output=b'{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}',
+                )
+            return self.gh_run(args, **kwargs)
+
+        self.override_gh("graphql", timed_out)
+        workflows, errors = scan.collect_org_workflows(repos)
+        self.assertEqual(count, 2)
+        self.assertEqual(len(workflows), 1)
+        self.assertEqual(len(errors), 50)
+        self.assertFalse(any("Not queried" in error["error"] for error in errors))
+
+    def test_negated_or_quoted_limit_phrases_do_not_stop_later_batches(self) -> None:
+        repos = [{"full_name": f"example/repo{i}"} for i in range(51)]
+        for message in (
+            "This is not API rate limit exceeded; permission validation failed.",
+            'Permission validation failed while explaining "API rate limit exceeded".',
+            '"You have exceeded a secondary rate limit" is an example, not this failure.',
+        ):
+            with self.subTest(message=message):
+                count = 0
+
+                def denied(args, *, message=message, **kwargs):
+                    nonlocal count
+                    count += 1
+                    completed = self.gh_run(args, **kwargs)
+                    if count == 1:
+                        response = json.loads(completed.stdout)
+                        response["data"]["r0"] = None
+                        response["errors"] = [{"type": "FORBIDDEN", "message": message, "path": ["r0"]}]
+                        return self.completed(
+                            args, 1, json.dumps(response), "gh: permission validation failed"
+                        )
+                    return completed
+
+                self.override_gh("graphql", denied)
+                workflows, errors = scan.collect_org_workflows(repos)
+                self.assertEqual(count, 2)
+                self.assertEqual(len(workflows), 50)
+                self.assertEqual(len(errors), 1)
+                self.assertIn(message, errors[0]["error"])
+                self.assertFalse(any("Not queried" in error["error"] for error in errors))
+
+    def test_warm_inventory_has_no_discovery_or_owner_probe(self) -> None:
+        self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
+        self.graphql_nodes["example/retired"] = self.tree_node("outside/transferred")
+        self.gh.reset_mock()
+        code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertNotIn("discovery_", stderr)
+        self.assertEqual([self.gh_request(call.args[0]).kind for call in self.gh.call_args_list], ["auth"])
+
+    def test_discovery_progress_is_flushed_and_counts_attempted_batches(self) -> None:
+        repos = [{"full_name": f"example/repo{i}"} for i in range(51)]
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            mock.patch("builtins.print", wraps=print) as printed,
+        ):
+            scan.load_repos(self.cache, "example", True)
+            scan.collect_org_workflows(repos)
+        self.assertEqual(
+            stderr.getvalue().splitlines(),
+            [
+                "discovery_stage=repositories",
+                "discovery_batch=1/2",
+                "discovery_batch=2/2",
+            ],
+        )
+        self.assertTrue(all(call.kwargs.get("flush") is True for call in printed.call_args_list))
+
+    def test_warm_inventory_deduplicates_saved_paths_without_api_calls(self) -> None:
+        self.repos = ["example/retired"]
+        self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
+        cached = self.cache / "example-workflow-files-v3.tsv"
+        with cached.open(encoding="utf-8") as source:
+            rows = list(csv.DictReader(source, delimiter="\t"))
+        scan.write_tsv(cached, rows + rows, scan.WORKFLOW_FIELDS)
+        self.gh.reset_mock()
+        with mock.patch.object(scan, "fetch_text", wraps=scan.fetch_text) as fetch:
+            code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual([self.gh_request(call.args[0]).kind for call in self.gh.call_args_list], ["auth"])
+
+    def test_conflicting_saved_branches_rebuild_the_workflow_inventory(self) -> None:
+        self.repos = ["example/retired"]
+        self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
+        cached = self.cache / "example-workflow-files-v3.tsv"
+        with cached.open(encoding="utf-8") as source:
+            row = next(csv.DictReader(source, delimiter="\t"))
+        other = dict(row, branch="other")
+        scan.write_tsv(cached, [row, other], scan.WORKFLOW_FIELDS)
+        self.gh.reset_mock()
+        code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertIn("discovery_batch=1/1", stderr)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertEqual(
+            [self.gh_request(call.args[0]).kind for call in self.gh.call_args_list], ["auth", "graphql"]
+        )
 
 
 if __name__ == "__main__":

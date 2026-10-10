@@ -1,0 +1,9 @@
+{
+  "scan_status": "incomplete",
+  "reports_clean_scan": false,
+  "high_confidence_count": 0,
+  "finding_repositories": [],
+  "scope_failure_reported": false,
+  "unqueried_scope_reported": false,
+  "inventory_scope": "refreshed"
+}
