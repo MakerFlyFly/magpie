@@ -5,12 +5,12 @@
 
 Behavioral evals for the `ci-runner-audit` skill.
 
-## Suites (19 cases total)
+## Suites (23 cases total)
 
 | Suite | Step | Cases | What it covers |
 |---|---|---|---|
 | step-scope-selection | Scope selection and command choice | 4 | explicit repo, ambiguous Apache project, full-org scan, prompt injection ignored |
-| step-reporting | Reporting discipline | 15 | high-confidence vs broad candidates, CI-risk language, incomplete scans, prerequisite and input-encoding failures, consistent failure prefixes, confirmed empty repositories, stale-inventory hints, unknown completeness, invalid refs, malformed entries, cache failures, partial checks |
+| step-reporting | Reporting discipline | 19 | high-confidence vs broad candidates, CI-risk language, incomplete scans, prerequisite and input-encoding failures, consistent failure prefixes, confirmed empty repositories, stale-inventory hints, unknown completeness, invalid refs, malformed entries, cache failures, partial checks |
 
 ## Run
 
@@ -50,3 +50,6 @@ Cache-publication and individual-check failures keep their successful findings r
 Invalid repo-file encoding stops before repository discovery; previous findings files are not results of that failed invocation.
 Confirmed empty Git repositories are complete zero-workflow scans, while stale workflow URLs remain incomplete results with a manual refresh hint.
 Resolving a repo-file scope before authentication gives matching error and findings prefixes; old findings remain stale when authentication fails.
+
+GraphQL partial success and unexplained directory nulls retain incomplete reporting; a directory-batch timeout preserves later successful findings without becoming a whole-audit deadline.
+Cache-only failures distinguish completed workflow coverage from an incomplete invocation, including zero-finding audits.

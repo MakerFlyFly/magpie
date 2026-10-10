@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 3124
+measured_tokens: 3472
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -158,6 +158,10 @@ Requires Python 3.11+, PyYAML (`python3 -m pip install pyyaml` or the system's `
 The script checks dependencies and the active authentication before enumerating repositories.
 It uses `gh auth status --active` when supported; only an explicit unsupported-flag error triggers a hostname-only retry for `gh` versions before 2.57.
 The older command checks all configured accounts on `github.com`, so an invalid inactive account can also fail its prerequisite check; upgrade `gh` for active-account-only checking.
+`--gh-auth-timeout` (default `30`), `--gh-api-timeout` (default `60`), and `--gh-pagination-timeout` (default `300`) set positive integer seconds per authentication command, metadata/directory command, and complete repository-pagination command respectively.
+These are per-command budgets, not a deadline for the whole audit.
+Authentication timeouts fail prerequisites; repository-pagination timeouts stop org discovery; local metadata, directory and GraphQL batch timeouts preserve other successful results.
+A timeout never triggers an authentication compatibility retry or accepts partial stdout as a successful response.
 
 For one repository:
 
@@ -208,7 +212,18 @@ Org scans use `<owner>-repos-v2.jsonl` and `<owner>-workflow-files-v3.tsv`; olde
 Both inventories are published through atomic replacements only after complete, valid enumeration.
 A failed refresh preserves previous complete inventories; the current scan uses current enumeration results without falling back to stale workflows.
 Cache-write failures are reported at stage `cache` while valid in-memory workflows continue to be scanned.
-In an org scan without `--refresh`, a workflow download HTTP 404 includes a reminder that the inventory may be stale; the scanner does not refresh automatically.
+Only a real HTTP 404 downloading from a reused, valid workflow inventory includes a reminder that the inventory may be stale; the scanner does not refresh automatically.
+Fresh enumeration, damaged-cache rebuilds and failed refreshes do not count as workflow-cache hits.
+
+Organization scans list public, non-archived repositories with REST pagination, then enumerate workflow directories in sequential GraphQL batches of at most 50 repositories.
+Each batch reads the current default branch's Commit and its workflow Tree entries; only regular blob YAML files are scanned, excluding directories, symlinks and submodules.
+Download and evidence URLs use that branch name; workflow content is not pinned to the enumeration commit.
+An empty repository requires `isEmpty=true`.
+A non-empty repository has no workflow directory only when its valid Commit's directory field is explicitly null and a `NOT_FOUND` error identifies exactly that field.
+Missing fields, unexplained nulls, repository/ref errors and unknown errors make the scan incomplete.
+Structured GraphQL partial responses preserve valid repositories and entries even when `gh` exits non-zero; ordinary command failures remain errors.
+Rate limits stop later batches and report the unqueried repositories without automatic retry or a REST-directory fallback.
+Explicit repository scans keep REST directory enumeration and validated SHA retries.
 
 ---
 
@@ -230,9 +245,9 @@ It prints `scan_complete`, `workflows_scanned`, and `scan_errors` to stderr; `wo
 Completion includes output and cache publication, so a cache failure still makes the invocation incomplete even when every enumerated file was checked.
 Exit status is `0` for a complete scan, `1` for an incomplete scan or output failure, and `2` for unavailable prerequisites or invalid arguments.
 Global prerequisite failures and failed org discovery terminate immediately; local failures are collected while the remaining work continues.
-A workflow-directory HTTP 404 means no workflows only after the target ref resolves to a valid commit SHA and a retry at that SHA also returns 404.
+For explicit repositories, a workflow-directory HTTP 404 means no workflows only after the target ref resolves to a valid commit SHA and a retry at that SHA also returns 404.
 A ref-validation HTTP 409 explicitly reporting `Git Repository is empty.` also means no workflows; other conflicts remain errors.
-A missing or inaccessible ref, failed verification, or malformed response makes the scan incomplete; use `--refresh` to update stale org metadata.
+A missing or inaccessible ref, failed verification, or malformed response makes the scan incomplete.
 A successful empty listing also means no workflows.
 
 Use `--scope-name` for stable output names for project or repo-set
@@ -274,6 +289,7 @@ Report findings in this order:
 
 Check the command's exit status, `scan_complete`, and `scan_errors` before interpreting the findings.
 If the exit status is non-zero, `scan_complete=false`, or `scan_errors>0`, report the audit as incomplete, include the failure count and available error context, and identify successful findings as partial results.
+When all errors are at stage `cache`, state that every enumerated workflow was checked and the invocation is incomplete because cache persistence failed.
 Never describe an incomplete audit as clean or claim the scope has no issues, even when its findings TSVs are empty.
 Report a clean scan only when the command succeeded, `scan_complete=true`, `scan_errors=0`, and there are no findings.
 When completion evidence is missing, state that completeness is unknown.

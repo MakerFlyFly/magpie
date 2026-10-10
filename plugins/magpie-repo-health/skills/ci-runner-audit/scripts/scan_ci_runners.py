@@ -31,7 +31,7 @@ import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import urlopen
@@ -97,27 +97,49 @@ class ScanError(RuntimeError):
 class GhError(ScanError):
     """A gh command failed, with its original diagnostic and HTTP status."""
 
-    def __init__(self, message: str, status: int | None = None, diagnostic: str = "") -> None:
+    def __init__(
+        self, message: str, status: int | None = None, diagnostic: str = "", stdout: bytes | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.diagnostic = diagnostic
+        self.stdout = stdout
 
 
 WORKFLOW_FIELDS = ["repo", "branch", "path", "url", "html_url"]
 ERROR_FIELDS = ["repo", "path", "stage", "error", "html_url"]
+YAML_REQUIRED = "PyYAML is required. Install python3-yaml or pyyaml."
+GRAPHQL_BATCH_SIZE = 50
+WORKFLOW_DIRECTORY = ".github/workflows"
 
 
-def run(args: list[str]) -> str:
+def diagnostic_text(value: bytes | str | None) -> str:
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+
+
+def run(args: list[str], timeout: int = 60) -> str:
     command = " ".join(args[:3])
     if args[:3] == ["gh", "api", "--paginate"] and len(args) > 3:
         command = f"gh api {args[3]}"
-    completed = subprocess.run(args, capture_output=True, check=False)
+    try:
+        completed = subprocess.run(args, capture_output=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        diagnostic = "\n".join(
+            text.strip()
+            for text in (diagnostic_text(exc.stderr), diagnostic_text(exc.stdout))
+            if text.strip()
+        )
+        raise ScanError(
+            f"{command}: timed out after {timeout}s; {diagnostic or 'no captured diagnostic'}"
+        ) from exc
     if completed.returncode:
-        stderr = (completed.stderr or b"").decode("utf-8", errors="replace")
-        stdout = (completed.stdout or b"").decode("utf-8", errors="replace")
+        stderr = diagnostic_text(completed.stderr)
+        stdout = diagnostic_text(completed.stdout)
         diagnostic = stderr.strip() or stdout.strip() or "no captured diagnostic"
         status = re.search(r"\(HTTP (\d{3})\)", stderr)
-        raise GhError(f"{command}: {diagnostic}", int(status[1]) if status else None, diagnostic)
+        raise GhError(
+            f"{command}: {diagnostic}", int(status[1]) if status else None, diagnostic, completed.stdout
+        )
     if completed.stdout is None:
         raise ScanError(f"{command}: stdout was not captured")
     try:
@@ -126,18 +148,18 @@ def run(args: list[str]) -> str:
         raise ScanError(f"{command}: invalid UTF-8 response: {exc}") from exc
 
 
-def check_gh_auth() -> None:
+def check_gh_auth(timeout: int = 30) -> None:
     try:
-        run(["gh", "auth", "status", "--active", "--hostname", "github.com"])
+        run(["gh", "auth", "status", "--active", "--hostname", "github.com"], timeout)
     except GhError as exc:
         if exc.status is not None or not re.match(r"unknown flag: --active(?:\s|$)", exc.diagnostic):
             raise
         # Older gh checks all configured accounts on the selected host.
-        run(["gh", "auth", "status", "--hostname", "github.com"])
+        run(["gh", "auth", "status", "--hostname", "github.com"], timeout)
 
 
-def gh_json(path: str) -> object:
-    return json.loads(run(["gh", "api", path]))
+def gh_json(path: str, timeout: int = 60) -> object:
+    return json.loads(run(["gh", "api", path], timeout))
 
 
 def scan_error(context: dict, stage: str, exc: Exception) -> dict:
@@ -187,7 +209,9 @@ def valid_repo_metadata(repo: object) -> bool:
     )
 
 
-def load_repos(cache_dir: Path, owner: str, refresh: bool) -> tuple[list[dict], list[dict]]:
+def load_repos(
+    cache_dir: Path, owner: str, refresh: bool, pagination_timeout: int = 300
+) -> tuple[list[dict], list[dict]]:
     repo_file = cache_dir / f"{owner}-repos-v2.jsonl"
     if not refresh:
         try:
@@ -208,7 +232,8 @@ def load_repos(cache_dir: Path, owner: str, refresh: bool) -> tuple[list[dict], 
             f"/orgs/{owner}/repos?per_page=100&type=public",
             "--jq",
             ".[] | select(.archived == false) | {full_name, default_branch}",
-        ]
+        ],
+        pagination_timeout,
     )
     response = [json.loads(line) for line in output.splitlines() if line.strip()]
     repos = []
@@ -232,8 +257,8 @@ def load_repos(cache_dir: Path, owner: str, refresh: bool) -> tuple[list[dict], 
     return repos, errors
 
 
-def load_repo(full_name: str) -> dict:
-    repo = gh_json(f"repos/{full_name}")
+def load_repo(full_name: str, api_timeout: int = 60) -> dict:
+    repo = gh_json(f"repos/{full_name}", api_timeout)
     if not isinstance(repo, dict):
         raise ScanError(f"Unexpected repository metadata for {full_name}")
     if repo.get("archived"):
@@ -260,10 +285,10 @@ def scope_key(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "scope"
 
 
-def workflow_contents(full_name: str, branch: str) -> object:
+def workflow_contents(full_name: str, branch: str, api_timeout: int = 60) -> object:
     directory = f"repos/{full_name}/contents/.github/workflows?ref="
     try:
-        return gh_json(directory + quote(branch, safe=""))
+        return gh_json(directory + quote(branch, safe=""), api_timeout)
     except GhError as exc:
         if exc.status != 404:
             raise
@@ -277,7 +302,8 @@ def workflow_contents(full_name: str, branch: str) -> object:
                     f"repos/{full_name}/commits/{quote(branch, safe='')}",
                     "-H",
                     "Accept: application/vnd.github.sha",
-                ]
+                ],
+                api_timeout,
             ).strip()
             if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
                 raise ScanError("Ref-validation response must be a 40-character hexadecimal commit SHA")
@@ -293,19 +319,20 @@ def workflow_contents(full_name: str, branch: str) -> object:
                 return []
             raise ScanError(f"{exc}; cannot verify ref {branch}: {validation_error}") from validation_error
         try:
-            return gh_json(directory + sha)
+            return gh_json(directory + sha, api_timeout)
         except Exception as retry_error:
             if isinstance(retry_error, GhError) and retry_error.status == 404:
                 return []
             raise ScanError(f"{exc}; directory retry at {sha} failed: {retry_error}") from retry_error
 
 
-def list_workflows_for_repo(repo: dict) -> tuple[list[dict], list[dict]]:
+def list_workflows_for_repo(repo: dict, api_timeout: int = 60) -> tuple[list[dict], list[dict]]:
+    # Also used independently of the metadata loader; retain this boundary check.
     if not valid_repo_metadata(repo):
         raise ScanError("Repository metadata must include full_name and default_branch strings")
     full_name = repo["full_name"]
     branch = repo["default_branch"]
-    contents = workflow_contents(full_name, branch)
+    contents = workflow_contents(full_name, branch, api_timeout)
     if not isinstance(contents, list):
         raise ScanError(f"Unexpected workflow-list response for {full_name}")
     workflows = []
@@ -339,11 +366,13 @@ def list_workflows_for_repo(repo: dict) -> tuple[list[dict], list[dict]]:
     return workflows, errors
 
 
-def collect_workflows(repos: list[dict], workers: int) -> tuple[list[dict], list[dict]]:
+def collect_workflows(
+    repos: list[dict], workers: int, api_timeout: int = 60
+) -> tuple[list[dict], list[dict]]:
     workflows: list[dict] = []
     errors: list[dict] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(list_workflows_for_repo, repo): repo for repo in repos}
+        futures = {executor.submit(list_workflows_for_repo, repo, api_timeout): repo for repo in repos}
         for future in as_completed(futures):
             try:
                 repo_workflows, repo_errors = future.result()
@@ -354,7 +383,231 @@ def collect_workflows(repos: list[dict], workers: int) -> tuple[list[dict], list
     return sorted(workflows, key=lambda row: (row["repo"], row["path"])), errors
 
 
-def load_workflows(cache_dir: Path, owner: str, refresh: bool, workers: int) -> tuple[list[dict], list[dict]]:
+def workflow_query(repos: list[dict]) -> str:
+    selections = []
+    for index, repo in enumerate(repos):
+        owner, name = repo["full_name"].split("/", 1)
+        selections.append(
+            f"r{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{"
+            " nameWithOwner isEmpty defaultBranchRef { name target { __typename ... on Commit {"
+            ' oid workflowDir: file(path: ".github/workflows") {'
+            " type mode path object { __typename ... on Tree { entries { name type mode } } }"
+            " } } } } }"
+        )
+    return "query { " + " ".join(selections) + " }"
+
+
+def valid_graphql_response(response: object, *, partial: bool = False) -> TypeGuard[dict]:
+    if not isinstance(response, dict) or "data" not in response:
+        return False
+    errors = response.get("errors", [])
+    return (
+        isinstance(errors, list)
+        and all(
+            isinstance(error, dict) and isinstance(error.get("message"), str) and error["message"]
+            for error in errors
+        )
+        and (not partial or bool(errors))
+        and (isinstance(response["data"], dict) or (response["data"] is None and bool(errors)))
+    )
+
+
+def graphql_response(query: str, api_timeout: int) -> tuple[dict, GhError | None]:
+    failure = None
+    try:
+        output = run(["gh", "api", "graphql", "-f", f"query={query}"], api_timeout)
+    except GhError as exc:
+        # GraphQL field errors make gh exit nonzero even when data contains valid aliases.
+        # Only this caller may recover that strict, structured partial response.
+        try:
+            response = json.loads(exc.stdout.decode("utf-8")) if exc.stdout is not None else None
+        except (UnicodeError, ValueError):
+            raise exc from None
+        if not valid_graphql_response(response, partial=True):
+            raise
+        failure = exc
+    else:
+        response = json.loads(output)
+    if not valid_graphql_response(response):
+        raise ScanError("Unexpected GraphQL response: expected data and an optional errors list")
+    return response, failure
+
+
+def graphql_error(error: dict, diagnostic: str) -> ScanError:
+    message = f"GraphQL {error.get('type', 'unknown')}: {error.get('message', 'missing message')}"
+    message += f" (path: {json.dumps(error.get('path'))})"
+    return ScanError(f"{message}; {diagnostic}" if diagnostic else message)
+
+
+def graphql_workflows(
+    repo: dict, node: object, alias: str, api_errors: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    full_name = repo["full_name"]
+    if (
+        not isinstance(node, dict)
+        or node.get("nameWithOwner") != full_name
+        or not isinstance(node.get("isEmpty"), bool)
+    ):
+        raise ScanError(f"Unexpected GraphQL repository metadata for {full_name}")
+    if node["isEmpty"]:
+        return [], []
+    ref = node.get("defaultBranchRef")
+    if not isinstance(ref, dict) or not isinstance(ref.get("name"), str) or not ref["name"]:
+        raise ScanError(f"GraphQL defaultBranchRef is missing or invalid for {full_name}")
+    commit = ref.get("target")
+    if (
+        not isinstance(commit, dict)
+        or commit.get("__typename") != "Commit"
+        or not isinstance(commit.get("oid"), str)
+        or not re.fullmatch(r"[0-9a-fA-F]{40}", commit["oid"])
+        or "workflowDir" not in commit
+    ):
+        raise ScanError(f"GraphQL default branch must resolve to a valid Commit for {full_name}")
+    directory = commit["workflowDir"]
+    if directory is None:
+        expected = [alias, "defaultBranchRef", "target", "workflowDir"]
+        if any(error.get("type") == "NOT_FOUND" and error.get("path") == expected for error in api_errors):
+            return [], []
+        raise ScanError(
+            f"GraphQL workflow directory is null without matching NOT_FOUND evidence for {full_name}"
+        )
+    tree = directory.get("object") if isinstance(directory, dict) else None
+    if (
+        not isinstance(directory, dict)
+        or directory.get("type") != "tree"
+        or directory.get("mode") != 0o040000
+        or directory.get("path") != WORKFLOW_DIRECTORY
+        or not isinstance(tree, dict)
+        or tree.get("__typename") != "Tree"
+        or not isinstance(tree.get("entries"), list)
+    ):
+        raise ScanError(f"GraphQL workflow directory must contain Tree entries for {full_name}")
+    branch = ref["name"]
+    workflows = []
+    errors = []
+    modes = {"blob": {0o100644, 0o100755, 0o120000}, "tree": {0o040000}, "commit": {0o160000}}
+    for index, entry in enumerate(tree["entries"]):
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("name"), str)
+            or not entry["name"]
+            or entry["name"] in (".", "..")
+            or "/" in entry["name"]
+            or not isinstance(entry.get("type"), str)
+            or entry["type"] not in modes
+            or type(entry.get("mode")) is not int
+            or entry["mode"] not in modes[entry["type"]]
+        ):
+            errors.append(
+                scan_error(repo, "workflow-list", ScanError(f"Invalid GraphQL Tree entry {index}: {entry!r}"))
+            )
+            continue
+        if entry["type"] != "blob" or entry["mode"] not in (0o100644, 0o100755):
+            continue
+        path = f"{WORKFLOW_DIRECTORY}/{entry['name']}"
+        if re.search(r"\.ya?ml$", path):
+            workflows.append(
+                {
+                    "repo": full_name,
+                    "branch": branch,
+                    "path": path,
+                    "url": f"https://raw.githubusercontent.com/{full_name}/{quote(branch, safe='')}/{quote(path)}",
+                    "html_url": f"https://github.com/{full_name}/blob/{quote(branch, safe='')}/{quote(path)}",
+                }
+            )
+    return workflows, errors
+
+
+def collect_org_workflows(repos: list[dict], api_timeout: int = 60) -> tuple[list[dict], list[dict]]:
+    workflows: list[dict] = []
+    errors: list[dict] = []
+    valid_repos = []
+    for repo in repos:
+        full_name = repo.get("full_name") if isinstance(repo, dict) else None
+        parts = full_name.split("/") if isinstance(full_name, str) else []
+        if len(parts) == 2 and all(parts):
+            valid_repos.append(repo)
+        else:
+            errors.append(
+                scan_error(
+                    repo if isinstance(repo, dict) else {},
+                    "metadata",
+                    ScanError("Repository full_name must contain owner/name"),
+                )
+            )
+    repos = valid_repos
+    for offset in range(0, len(repos), GRAPHQL_BATCH_SIZE):
+        batch = repos[offset : offset + GRAPHQL_BATCH_SIZE]
+        limited = False
+        try:
+            response, failure = graphql_response(workflow_query(batch), api_timeout)
+        except Exception as exc:
+            errors.extend(scan_error(repo, "workflow-list", exc) for repo in batch)
+            limited = isinstance(exc, GhError) and (
+                exc.status == 429 or (exc.status == 403 and "rate limit" in exc.diagnostic.lower())
+            )
+        else:
+            diagnostic = str(failure) if failure else ""
+            if failure is not None and failure.status is not None:
+                # HTTP failures remain failures even if every field error is normal absence.
+                errors.append(scan_error({}, "workflow-list", failure))
+                limited = failure.status == 429 or (
+                    failure.status == 403 and "rate limit" in failure.diagnostic.lower()
+                )
+            by_alias: dict[str, list[dict]] = {f"r{index}": [] for index in range(len(batch))}
+            for error in response.get("errors", []):
+                limited |= error.get("type") == "RATE_LIMITED"
+                path = error.get("path")
+                if isinstance(path, list) and path and isinstance(path[0], str) and path[0] in by_alias:
+                    by_alias[path[0]].append(error)
+                else:
+                    errors.append(scan_error({}, "workflow-list", graphql_error(error, diagnostic)))
+            for index, repo in enumerate(batch):
+                alias = f"r{index}"
+                api_errors = by_alias[alias]
+                node = (response["data"] or {}).get(alias)
+                try:
+                    rows, entry_errors = graphql_workflows(repo, node, alias, api_errors)
+                except ScanError as exc:
+                    if node is not None or not api_errors:
+                        errors.append(scan_error(repo, "workflow-list", exc))
+                    rows = []
+                    absent = False
+                else:
+                    # graphql_workflows has already validated the repository/ref/Commit.
+                    absent = (
+                        isinstance(node, dict)
+                        and not node["isEmpty"]
+                        and node["defaultBranchRef"]["target"]["workflowDir"] is None
+                    )
+                    errors.extend(entry_errors)
+                for error in api_errors:
+                    if (
+                        absent
+                        and error.get("type") == "NOT_FOUND"
+                        and error.get("path") == [alias, "defaultBranchRef", "target", "workflowDir"]
+                    ):
+                        continue
+                    errors.append(scan_error(repo, "workflow-list", graphql_error(error, diagnostic)))
+                workflows.extend(rows)
+        if limited:
+            errors.extend(
+                scan_error(
+                    repo, "workflow-list", ScanError("Not queried: an earlier GraphQL batch hit a rate limit")
+                )
+                for repo in repos[offset + len(batch) :]
+            )
+            break
+    return sorted(workflows, key=lambda row: (row["repo"], row["path"])), errors
+
+
+def valid_download_url(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def load_workflows(
+    cache_dir: Path, owner: str, refresh: bool, api_timeout: int = 60, pagination_timeout: int = 300
+) -> tuple[list[dict], list[dict], bool]:
     # v1/v2 inventories could have trusted truncated repo lists or ambiguous 404s.
     workflow_file = cache_dir / f"{owner}-workflow-files-v3.tsv"
     if not refresh:
@@ -364,28 +617,32 @@ def load_workflows(cache_dir: Path, owner: str, refresh: bool, workers: int) -> 
                 if reader.fieldnames == WORKFLOW_FIELDS:
                     workflows = list(reader)
                     if all(
-                        set(row) == set(WORKFLOW_FIELDS) and all(row.get(field) for field in WORKFLOW_FIELDS)
+                        set(row) == set(WORKFLOW_FIELDS)
+                        and all(row.get(field) for field in WORKFLOW_FIELDS)
+                        and valid_download_url(row.get("url"))
                         for row in workflows
                     ):
-                        return workflows, []
+                        return workflows, [], True
         except (OSError, UnicodeError, csv.Error):
             pass  # Rebuild unreadable or invalid workflow inventories below.
-    repos, errors = load_repos(cache_dir, owner, refresh)
-    workflows, listing_errors = collect_workflows(repos, workers)
+    repos, errors = load_repos(cache_dir, owner, refresh, pagination_timeout)
+    workflows, listing_errors = collect_org_workflows(repos, api_timeout)
     errors.extend(listing_errors)
-    if not errors and all(isinstance(workflow.get("url"), str) and workflow["url"] for workflow in workflows):
+    if not errors and all(valid_download_url(workflow.get("url")) for workflow in workflows):
         try:
             atomic_write(workflow_file, lambda path: write_tsv(path, workflows, WORKFLOW_FIELDS))
         except (OSError, UnicodeError, csv.Error) as exc:
             errors.append(scan_error({"path": workflow_file.name}, "cache", exc))
-    return workflows, errors
+    return workflows, errors, False
 
 
-def load_workflows_for_repos(repo_names: list[str], workers: int) -> tuple[list[dict], list[dict]]:
+def load_workflows_for_repos(
+    repo_names: list[str], workers: int, api_timeout: int = 60
+) -> tuple[list[dict], list[dict]]:
     repos = []
     errors = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(load_repo, repo_name): repo_name for repo_name in repo_names}
+        futures = {executor.submit(load_repo, repo_name, api_timeout): repo_name for repo_name in repo_names}
         for future in as_completed(futures):
             try:
                 repo = future.result()
@@ -394,13 +651,14 @@ def load_workflows_for_repos(repo_names: list[str], workers: int) -> tuple[list[
                 continue
             if repo:
                 repos.append(repo)
-    workflows, listing_errors = collect_workflows(repos, workers)
+    workflows, listing_errors = collect_workflows(repos, workers, api_timeout)
     return workflows, errors + listing_errors
 
 
 def yaml_load(text: str) -> object:
+    # Keep the guard for callers that use the parser independently of main().
     if yaml is None:
-        raise RuntimeError("PyYAML is required. Install python3-yaml or pyyaml.")
+        raise RuntimeError(YAML_REQUIRED)
     data = yaml.safe_load(text)
     return {} if data is None else data
 
@@ -477,10 +735,10 @@ def retired_hits(workflow: dict, data: object) -> list[dict]:
         if not isinstance(job, dict):
             continue
         run_values = lower_values(job.get("runs-on"))
-        rows = matrix_rows((job.get("strategy") or {}).get("matrix") or {})
+        matrix = (job.get("strategy") or {}).get("matrix") or {}
         labels = {value for value in run_values if value in RETIRED_LABELS}
         if "matrix." in " ".join(run_values):
-            for row in rows:
+            for row in matrix_rows(matrix):
                 labels.update(value for value in lower_values(row) if value in RETIRED_LABELS)
         if any("self-hosted" in value for value in run_values):
             labels.clear()
@@ -582,7 +840,7 @@ def arch_hits(workflow: dict, data: object) -> list[dict]:
 
 def scan_workflow(workflow: dict, command: str) -> tuple[list[dict], list[dict], list[dict]]:
     try:
-        if not isinstance(workflow.get("url"), str) or not workflow["url"]:
+        if not valid_download_url(workflow.get("url")):
             raise ScanError("Workflow has no download URL")
         text = fetch_text(workflow["url"])
     except Exception as exc:
@@ -606,7 +864,7 @@ def scan_workflow(workflow: dict, command: str) -> tuple[list[dict], list[dict],
 
 
 def parallel_scan(
-    workflows: list[dict], command: str, workers: int, *, refresh_hint: bool = False
+    workflows: list[dict], command: str, workers: int
 ) -> tuple[list[dict], list[dict], int, list[dict]]:
     retired: list[dict] = []
     arch: list[dict] = []
@@ -619,13 +877,8 @@ def parallel_scan(
                 retired_rows, arch_rows, check_errors = future.result()
             except Exception as exc:
                 error = scan_error(futures[future], getattr(exc, "stage", "check"), exc)
-                if (
-                    refresh_hint
-                    and error["stage"] == "download"
-                    and isinstance(exc.__cause__, HTTPError)
-                    and exc.__cause__.code == 404
-                ):
-                    error["error"] += " Organization inventory may be stale; rerun with --refresh."
+                if error["stage"] == "download" and isinstance(exc.__cause__, HTTPError):
+                    error["http_status"] = exc.__cause__.code
                 errors.append(error)
                 continue
             retired.extend(retired_rows)
@@ -673,10 +926,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache"))
     parser.add_argument("--out-dir", type=Path, default=Path("."))
     parser.add_argument("--workers", type=int, default=20)
+    parser.add_argument(
+        "--gh-auth-timeout", type=int, default=30, help="Seconds per gh authentication command."
+    )
+    parser.add_argument(
+        "--gh-api-timeout", type=int, default=60, help="Seconds per gh metadata/directory command."
+    )
+    parser.add_argument(
+        "--gh-pagination-timeout", type=int, default=300, help="Seconds for gh repository pagination."
+    )
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
     if args.workers < 1:
         parser.error("--workers must be positive")
+    for name in ("gh_auth_timeout", "gh_api_timeout", "gh_pagination_timeout"):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
     return args
 
 
@@ -758,18 +1023,17 @@ def finish_scan(args: argparse.Namespace, prefix: str, scanned: int, errors: lis
     return 1 if errors else 0
 
 
-def main() -> int:
-    args = parse_args()
+def input_repos(args: argparse.Namespace) -> list[str]:
     repo_names = sorted(set(args.repo))
-    input_error: Exception | None = None
-    try:
-        if args.repo_file:
-            repo_names = sorted(set(repo_names + load_repo_file(args.repo_file)))
-            if not repo_names:
-                raise ScanError("The explicit repository list is empty")
-    except (ScanError, OSError) as exc:
-        input_error = exc
-    prefix = scope_key(
+    if args.repo_file:
+        repo_names = sorted(set(repo_names + load_repo_file(args.repo_file)))
+        if not repo_names:
+            raise ScanError("The explicit repository list is empty")
+    return repo_names
+
+
+def output_prefix(args: argparse.Namespace, repo_names: list[str]) -> str:
+    return scope_key(
         args.scope_name
         or (
             repo_names[0]
@@ -779,14 +1043,23 @@ def main() -> int:
             else args.owner
         )
     )
+
+
+def main() -> int:
+    args = parse_args()
     try:
-        if input_error is not None:
-            raise input_error
+        repo_names = input_repos(args)
+    except (ScanError, OSError) as exc:
+        prefix = output_prefix(args, sorted(set(args.repo)))
+        finish_scan(args, prefix, 0, [scan_error({}, "prerequisite", exc)])
+        return 2
+    prefix = output_prefix(args, repo_names)
+    try:
         if sys.version_info < (3, 11):  # noqa: UP036 - standalone script may use an older system Python
             raise ScanError("Python 3.11 or newer is required")
         if yaml is None:
-            raise ScanError("PyYAML is required. Install python3-yaml or pyyaml.")
-        check_gh_auth()
+            raise ScanError(YAML_REQUIRED)
+        check_gh_auth(args.gh_auth_timeout)
     except (ScanError, OSError) as exc:
         finish_scan(args, prefix, 0, [scan_error({}, "prerequisite", exc)])
         return 2
@@ -795,14 +1068,19 @@ def main() -> int:
     scanned = 0
     stage = "repository-list"
     try:
+        from_cache = False
         if repo_names:
-            workflows, errors = load_workflows_for_repos(repo_names, args.workers)
+            workflows, errors = load_workflows_for_repos(repo_names, args.workers, args.gh_api_timeout)
         else:
-            workflows, errors = load_workflows(args.cache_dir, args.owner, args.refresh, args.workers)
+            workflows, errors, from_cache = load_workflows(
+                args.cache_dir, args.owner, args.refresh, args.gh_api_timeout, args.gh_pagination_timeout
+            )
         stage = "scan"
-        retired, arch, scanned, workflow_errors = parallel_scan(
-            workflows, args.command, args.workers, refresh_hint=not repo_names and not args.refresh
-        )
+        retired, arch, scanned, workflow_errors = parallel_scan(workflows, args.command, args.workers)
+        for error in workflow_errors:
+            status = error.pop("http_status", None)
+            if from_cache and error["stage"] == "download" and status == 404:
+                error["error"] += " Organization inventory may be stale; rerun with --refresh."
         errors.extend(workflow_errors)
         stage = "output"
         write_findings(args, prefix, retired, arch)
