@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 2916
+measured_tokens: 3124
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -156,6 +156,8 @@ asks for branch-specific analysis.
 Run from the framework checkout root.
 Requires Python 3.11+, PyYAML (`python3 -m pip install pyyaml` or the system's `python3-yaml` package), and `gh` authenticated to `github.com`.
 The script checks dependencies and the active authentication before enumerating repositories.
+It uses `gh auth status --active` when supported; only an explicit unsupported-flag error triggers a hostname-only retry for `gh` versions before 2.57.
+The older command checks all configured accounts on `github.com`, so an invalid inactive account can also fail its prerequisite check; upgrade `gh` for active-account-only checking.
 
 For one repository:
 
@@ -194,8 +196,10 @@ skills/ci-runner-audit/scripts/scan_ci_runners.py all \
 
 For only one check, replace `all` with `retired` or `macos-arch`.
 
-`--repo-file` requires UTF-8 text, with one `owner/repo` per line; blank lines and `#` comments are ignored.
+`--repo-file` requires UTF-8 text with an optional BOM, with one `owner/repo` per line; blank lines and `#` comments are ignored.
 Invalid input encoding is a global prerequisite failure: exit `2`, zero workflows scanned, and a scan-errors TSV with the UTF-8 requirement.
+Local repository inputs are resolved before dependency and authentication checks, so subsequent failures use the same output prefix as a successful invocation.
+If the file cannot be read, the prefix uses the known CLI scope; use `--scope-name` for stable names even when the file is invalid.
 
 Use `--refresh` for org scans when cached repo/workflow inventory may be
 stale. Explicit `--repo` and `--repo-file` scans fetch repository
@@ -204,6 +208,7 @@ Org scans use `<owner>-repos-v2.jsonl` and `<owner>-workflow-files-v3.tsv`; olde
 Both inventories are published through atomic replacements only after complete, valid enumeration.
 A failed refresh preserves previous complete inventories; the current scan uses current enumeration results without falling back to stale workflows.
 Cache-write failures are reported at stage `cache` while valid in-memory workflows continue to be scanned.
+In an org scan without `--refresh`, a workflow download HTTP 404 includes a reminder that the inventory may be stale; the scanner does not refresh automatically.
 
 ---
 
@@ -222,9 +227,11 @@ The script writes TSV files under `--out-dir`:
 The script keeps successful findings when an individual repository, workflow-list entry, workflow, or selected check fails.
 In `all` mode, a failed check reports stage `check` and its check name while retaining the other check's findings.
 It prints `scan_complete`, `workflows_scanned`, and `scan_errors` to stderr; `workflows_scanned` counts files that completed every requested check.
+Completion includes output and cache publication, so a cache failure still makes the invocation incomplete even when every enumerated file was checked.
 Exit status is `0` for a complete scan, `1` for an incomplete scan or output failure, and `2` for unavailable prerequisites or invalid arguments.
 Global prerequisite failures and failed org discovery terminate immediately; local failures are collected while the remaining work continues.
 A workflow-directory HTTP 404 means no workflows only after the target ref resolves to a valid commit SHA and a retry at that SHA also returns 404.
+A ref-validation HTTP 409 explicitly reporting `Git Repository is empty.` also means no workflows; other conflicts remain errors.
 A missing or inaccessible ref, failed verification, or malformed response makes the scan incomplete; use `--refresh` to update stale org metadata.
 A successful empty listing also means no workflows.
 

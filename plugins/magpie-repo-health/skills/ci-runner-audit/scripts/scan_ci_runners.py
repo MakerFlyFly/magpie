@@ -32,6 +32,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import urlopen
 
@@ -96,9 +97,10 @@ class ScanError(RuntimeError):
 class GhError(ScanError):
     """A gh command failed, with its original diagnostic and HTTP status."""
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(self, message: str, status: int | None = None, diagnostic: str = "") -> None:
         super().__init__(message)
         self.status = status
+        self.diagnostic = diagnostic
 
 
 WORKFLOW_FIELDS = ["repo", "branch", "path", "url", "html_url"]
@@ -106,19 +108,32 @@ ERROR_FIELDS = ["repo", "path", "stage", "error", "html_url"]
 
 
 def run(args: list[str]) -> str:
+    command = " ".join(args[:3])
+    if args[:3] == ["gh", "api", "--paginate"] and len(args) > 3:
+        command = f"gh api {args[3]}"
     completed = subprocess.run(args, capture_output=True, check=False)
     if completed.returncode:
         stderr = (completed.stderr or b"").decode("utf-8", errors="replace")
         stdout = (completed.stdout or b"").decode("utf-8", errors="replace")
         diagnostic = stderr.strip() or stdout.strip() or "no captured diagnostic"
         status = re.search(r"\(HTTP (\d{3})\)", stderr)
-        raise GhError(f"{' '.join(args[:3])}: {diagnostic}", int(status[1]) if status else None)
+        raise GhError(f"{command}: {diagnostic}", int(status[1]) if status else None, diagnostic)
     if completed.stdout is None:
-        raise ScanError(f"{' '.join(args[:3])}: stdout was not captured")
+        raise ScanError(f"{command}: stdout was not captured")
     try:
         return completed.stdout.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ScanError(f"{' '.join(args[:3])}: invalid UTF-8 response: {exc}") from exc
+        raise ScanError(f"{command}: invalid UTF-8 response: {exc}") from exc
+
+
+def check_gh_auth() -> None:
+    try:
+        run(["gh", "auth", "status", "--active", "--hostname", "github.com"])
+    except GhError as exc:
+        if exc.status is not None or not re.match(r"unknown flag: --active(?:\s|$)", exc.diagnostic):
+            raise
+        # Older gh checks all configured accounts on the selected host.
+        run(["gh", "auth", "status", "--hostname", "github.com"])
 
 
 def gh_json(path: str) -> object:
@@ -231,7 +246,7 @@ def load_repo(full_name: str) -> dict:
 def load_repo_file(path: Path) -> list[str]:
     repos = []
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except UnicodeError as exc:
         raise ScanError(f"Repository file {path} must use UTF-8 encoding: {exc}") from exc
     for line in text.splitlines():
@@ -267,6 +282,15 @@ def workflow_contents(full_name: str, branch: str) -> object:
             if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
                 raise ScanError("Ref-validation response must be a 40-character hexadecimal commit SHA")
         except Exception as validation_error:
+            if (
+                isinstance(validation_error, GhError)
+                and validation_error.status == 409
+                and re.search(
+                    r"(?m)(?:^|: )Git Repository is empty\.(?: \(HTTP 409\))?$",
+                    validation_error.diagnostic,
+                )
+            ):
+                return []
             raise ScanError(f"{exc}; cannot verify ref {branch}: {validation_error}") from validation_error
         try:
             return gh_json(directory + sha)
@@ -345,7 +369,7 @@ def load_workflows(cache_dir: Path, owner: str, refresh: bool, workers: int) -> 
                     ):
                         return workflows, []
         except (OSError, UnicodeError, csv.Error):
-            pass
+            pass  # Rebuild unreadable or invalid workflow inventories below.
     repos, errors = load_repos(cache_dir, owner, refresh)
     workflows, listing_errors = collect_workflows(repos, workers)
     errors.extend(listing_errors)
@@ -582,7 +606,7 @@ def scan_workflow(workflow: dict, command: str) -> tuple[list[dict], list[dict],
 
 
 def parallel_scan(
-    workflows: list[dict], command: str, workers: int
+    workflows: list[dict], command: str, workers: int, *, refresh_hint: bool = False
 ) -> tuple[list[dict], list[dict], int, list[dict]]:
     retired: list[dict] = []
     arch: list[dict] = []
@@ -594,7 +618,15 @@ def parallel_scan(
             try:
                 retired_rows, arch_rows, check_errors = future.result()
             except Exception as exc:
-                errors.append(scan_error(futures[future], getattr(exc, "stage", "check"), exc))
+                error = scan_error(futures[future], getattr(exc, "stage", "check"), exc)
+                if (
+                    refresh_hint
+                    and error["stage"] == "download"
+                    and isinstance(exc.__cause__, HTTPError)
+                    and exc.__cause__.code == 404
+                ):
+                    error["error"] += " Organization inventory may be stale; rerun with --refresh."
+                errors.append(error)
                 continue
             retired.extend(retired_rows)
             arch.extend(arch_rows)
@@ -729,6 +761,14 @@ def finish_scan(args: argparse.Namespace, prefix: str, scanned: int, errors: lis
 def main() -> int:
     args = parse_args()
     repo_names = sorted(set(args.repo))
+    input_error: Exception | None = None
+    try:
+        if args.repo_file:
+            repo_names = sorted(set(repo_names + load_repo_file(args.repo_file)))
+            if not repo_names:
+                raise ScanError("The explicit repository list is empty")
+    except (ScanError, OSError) as exc:
+        input_error = exc
     prefix = scope_key(
         args.scope_name
         or (
@@ -740,21 +780,17 @@ def main() -> int:
         )
     )
     try:
+        if input_error is not None:
+            raise input_error
         if sys.version_info < (3, 11):  # noqa: UP036 - standalone script may use an older system Python
             raise ScanError("Python 3.11 or newer is required")
         if yaml is None:
             raise ScanError("PyYAML is required. Install python3-yaml or pyyaml.")
-        run(["gh", "auth", "status", "--active", "--hostname", "github.com"])
-        if args.repo_file:
-            repo_names = sorted(set(repo_names + load_repo_file(args.repo_file)))
-            if not repo_names:
-                raise ScanError("The explicit repository list is empty")
+        check_gh_auth()
     except (ScanError, OSError) as exc:
         finish_scan(args, prefix, 0, [scan_error({}, "prerequisite", exc)])
         return 2
 
-    if not args.scope_name and repo_names:
-        prefix = scope_key(repo_names[0]) if len(repo_names) == 1 else "repo-set"
     errors: list[dict] = []
     scanned = 0
     stage = "repository-list"
@@ -764,7 +800,9 @@ def main() -> int:
         else:
             workflows, errors = load_workflows(args.cache_dir, args.owner, args.refresh, args.workers)
         stage = "scan"
-        retired, arch, scanned, workflow_errors = parallel_scan(workflows, args.command, args.workers)
+        retired, arch, scanned, workflow_errors = parallel_scan(
+            workflows, args.command, args.workers, refresh_hint=not repo_names and not args.refresh
+        )
         errors.extend(workflow_errors)
         stage = "output"
         write_findings(args, prefix, retired, arch)

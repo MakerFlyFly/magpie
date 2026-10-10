@@ -25,9 +25,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock as mock
+from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
+from urllib.error import HTTPError
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -274,6 +276,259 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(self.gh.call_count, 1)
         self.assertFalse(self.cache.exists())
 
+    def test_modern_auth_checks_only_the_active_account(self) -> None:
+        response = self.gh_run
+
+        def inactive_account_failure(args, **kwargs):
+            if args[1:3] == ["auth", "status"] and "--active" not in args:
+                return self.completed(args, 1, "", "inactive account has invalid credentials")
+            return response(args, **kwargs)
+
+        self.gh.side_effect = inactive_account_failure
+        code, _ = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 0)
+        auth = [call.args[0] for call in self.gh.call_args_list if call.args[0][1:3] == ["auth", "status"]]
+        self.assertEqual(len(auth), 1)
+        self.assertIn("--active", auth[0])
+
+    def test_legacy_auth_retries_only_the_unsupported_active_flag(self) -> None:
+        response = self.gh_run
+
+        def legacy_auth(args, **kwargs):
+            if args[1:3] == ["auth", "status"] and "--active" in args:
+                return self.completed(args, 1, "", "unknown flag: --active\n\nUsage: gh auth status")
+            return response(args, **kwargs)
+
+        self.gh.side_effect = legacy_auth
+        code, stderr = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 0)
+        self.assertIn("scan_complete=true", stderr)
+        auth = [call.args[0] for call in self.gh.call_args_list if call.args[0][1:3] == ["auth", "status"]]
+        self.assertEqual(len(auth), 2)
+        self.assertEqual(auth[1], ["gh", "auth", "status", "--hostname", "github.com"])
+
+    def test_legacy_auth_failure_remains_a_prerequisite_error(self) -> None:
+        def failed_legacy_auth(args, **kwargs):
+            message = "unknown flag: --active" if "--active" in args else "legacy credentials invalid"
+            return self.completed(args, 1, "", message)
+
+        self.gh.side_effect = failed_legacy_auth
+        code, stderr = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 2)
+        self.assertIn("legacy credentials invalid", stderr)
+        self.assertEqual(self.gh.call_count, 2)
+        self.assertTrue(all(call.args[0][1:3] == ["auth", "status"] for call in self.gh.call_args_list))
+        self.assertEqual(self.rows("scan-errors")[0]["stage"], "prerequisite")
+
+    def test_unrelated_auth_failures_never_retry(self) -> None:
+        for diagnostic in [
+            "authentication unavailable",
+            "unknown flag: --active-account",
+            "authentication error mentions unknown flag: --active",
+            "unknown flag: --active (HTTP 403)",
+        ]:
+            with self.subTest(diagnostic=diagnostic):
+                self.gh.reset_mock()
+                self.gh.side_effect = lambda args, diagnostic=diagnostic, **kwargs: self.completed(
+                    args, 1, "", diagnostic
+                )
+                code, _ = self.invoke("all", "--repo", "example/retired")
+                self.assertEqual(code, 2)
+                self.assertEqual(self.gh.call_count, 1)
+
+    def test_repository_file_scope_is_stable_when_authentication_fails(self) -> None:
+        path = self.root / "repos.txt"
+        cases = [
+            ("example/retired\n", (), "example-retired"),
+            ("example/retired\nexample/clean\n", (), "repo-set"),
+            ("example/clean\n", ("--repo", "example/retired"), "repo-set"),
+            ("example/retired\n", ("--repo", "example/retired"), "example-retired"),
+            ("example/retired\n", ("--scope-name", "stable-audit"), "stable-audit"),
+        ]
+        for contents, extra, prefix in cases:
+            with self.subTest(prefix=prefix, extra=extra, contents=contents):
+                path.write_text(contents, encoding="utf-8")
+                self.auth_failure = False
+                self.assertEqual(self.invoke("all", "--repo-file", str(path), *extra)[0], 0)
+                self.assertEqual(self.rows("scan-errors", prefix), [])
+                findings = self.out / f"{prefix}-retired-gh-runners-confirmed.tsv"
+                previous = findings.read_bytes()
+                self.auth_failure = True
+                code, stderr = self.invoke("all", "--repo-file", str(path), *extra)
+                self.assertEqual(code, 2)
+                self.assertIn("workflows_scanned=0", stderr)
+                self.assertEqual(self.rows("scan-errors", prefix)[0]["stage"], "prerequisite")
+                self.assertEqual(findings.read_bytes(), previous)
+
+    def test_repository_file_scope_is_resolved_before_dependency_checks(self) -> None:
+        path = self.root / "repos.txt"
+        path.write_text("example/retired\n", encoding="utf-8")
+        for missing in ["yaml", "python"]:
+            with self.subTest(missing=missing):
+                self.gh.reset_mock()
+                dependency = (
+                    mock.patch.object(scan, "yaml", None)
+                    if missing == "yaml"
+                    else mock.patch.object(scan.sys, "version_info", (3, 10))
+                )
+                with dependency:
+                    code, _ = self.invoke("all", "--repo-file", str(path))
+                self.assertEqual(code, 2)
+                self.gh.assert_not_called()
+                self.assertEqual(self.rows("scan-errors")[0]["stage"], "prerequisite")
+
+    def test_unreadable_and_empty_repo_files_stop_before_authentication(self) -> None:
+        path = self.root / "repos.txt"
+        code, _ = self.invoke("all", "--repo-file", str(path), "--scope-name", "stable-audit")
+        self.assertEqual(code, 2)
+        self.gh.assert_not_called()
+        self.assertEqual(self.rows("scan-errors", "stable-audit")[0]["stage"], "prerequisite")
+        path.write_text("# no repositories\n\n", encoding="utf-8")
+        code, stderr = self.invoke("all", "--repo-file", str(path))
+        self.assertEqual(code, 2)
+        self.assertIn("repository list is empty", stderr)
+        self.gh.assert_not_called()
+        self.assertEqual(self.rows("scan-errors", "repo-set")[0]["stage"], "prerequisite")
+
+    def test_utf8_bom_repo_file_accepts_comments_or_first_repository(self) -> None:
+        path = self.root / "repos.txt"
+        for contents in ["# 仓库\nexample/retired\n", "example/retired\n"]:
+            with self.subTest(contents=contents):
+                path.write_text(contents, encoding="utf-8-sig")
+                code, stderr = self.invoke("all", "--repo-file", str(path))
+                self.assertEqual(code, 0)
+                self.assertIn("workflows_scanned=1", stderr)
+                self.assertEqual(self.rows("scan-errors"), [])
+
+    def test_empty_repository_is_complete_and_cacheable(self) -> None:
+        response = self.gh_run
+
+        def empty_repository(args, **kwargs):
+            endpoint = args[2]
+            if endpoint.startswith("repos/example/clean/contents/"):
+                return self.completed(args, 1, "", "gh: This repository is empty. (HTTP 404)")
+            if endpoint.startswith("repos/example/clean/commits/"):
+                return self.completed(args, 1, "", "gh: Git Repository is empty. (HTTP 409)")
+            return response(args, **kwargs)
+
+        self.gh.side_effect = empty_repository
+        code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertIn("workflows_scanned=1", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
+        self.assertEqual(self.rows("scan-errors", "example"), [])
+        self.assertTrue((self.cache / "example-workflow-files-v3.tsv").exists())
+        self.assertFalse(any(f"ref={self.sha}" in call.args[0][2] for call in self.gh.call_args_list))
+        self.gh.reset_mock()
+        self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
+        self.assertEqual(self.gh.call_count, 1)
+        self.repos = ["example/clean"]
+        code, stderr = self.invoke("all", "--owner", "example", "--refresh")
+        self.assertEqual(code, 0)
+        self.assertIn("workflows_scanned=0", stderr)
+        self.assertEqual(self.rows("scan-errors", "example"), [])
+        self.assertEqual(self.rows("retired-gh-runners-confirmed", "example"), [])
+
+    def test_conflicts_or_permission_errors_are_not_empty_repositories(self) -> None:
+        self.list_failures = {"example/retired": 404}
+        response = self.gh_run
+        cases = [
+            (409, message)
+            for message in ["Conflict", "not Git Repository is empty.", "Git Repository is empty. maybe"]
+        ]
+        cases += [(status, "Git Repository is empty.") for status in [401, 403, 404, 429, 500]]
+        for status, message in cases:
+            with self.subTest(status=status, message=message):
+
+                def invalid_verification(args, *, message=message, status=status, **kwargs):
+                    if "/commits/" in args[2]:
+                        return self.completed(args, 1, "", f"gh: {message} (HTTP {status})")
+                    return response(args, **kwargs)
+
+                self.gh.side_effect = invalid_verification
+                code, stderr = self.invoke("all", "--owner", "example", "--refresh")
+                self.assertEqual(code, 1)
+                self.assertIn("cannot verify ref", stderr)
+                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+
+    def test_stale_cached_404_has_refresh_hint_and_manual_refresh_recovers(self) -> None:
+        self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
+        fetch = scan.fetch_text
+
+        def removed_workflow(url):
+            if url == self.files["example/retired"].as_uri():
+                raise HTTPError(url, 404, "Not Found", Message(), None)
+            return fetch(url)
+
+        response = self.gh_run
+
+        def current_listing(args, **kwargs):
+            if args[2].startswith("repos/example/retired/contents/"):
+                return self.completed(args, 0, "[]", "")
+            return response(args, **kwargs)
+
+        self.gh.side_effect = current_listing
+        with mock.patch.object(scan, "fetch_text", side_effect=removed_workflow):
+            self.gh.reset_mock()
+            code, stderr = self.invoke("all", "--owner", "example")
+            self.assertEqual(code, 1)
+            self.assertIn("workflows_scanned=1", stderr)
+            self.assertEqual(self.gh.call_count, 1)  # No automatic re-enumeration.
+            error = self.rows("scan-errors", "example")[0]
+            self.assertEqual(error["stage"], "download")
+            self.assertIn("inventory may be stale", error["error"])
+            self.assertIn("--refresh", error["error"])
+            self.assertEqual(self.invoke("all", "--owner", "example", "--refresh")[0], 0)
+            self.assertEqual(self.rows("scan-errors", "example"), [])
+            self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
+
+    def test_refresh_hints_are_not_added_for_other_failures_or_scopes(self) -> None:
+        cases = [
+            (403, ("--owner", "example"), "example"),
+            (429, ("--owner", "example"), "example"),
+            (500, ("--owner", "example"), "example"),
+            (404, ("--repo", "example/retired"), "example-retired"),
+            (404, ("--owner", "example", "--refresh"), "example"),
+        ]
+        for status, scope, prefix in cases:
+            with self.subTest(status=status, scope=scope):
+                error = HTTPError("https://example.invalid/ci.yml", status, "failed", Message(), None)
+                with mock.patch.object(scan, "fetch_text", side_effect=error):
+                    code, _ = self.invoke("all", *scope)
+                self.assertEqual(code, 1)
+                self.assertTrue(
+                    all("--refresh" not in row["error"] for row in self.rows("scan-errors", prefix))
+                )
+
+    def test_paginated_errors_include_endpoint_without_request_headers(self) -> None:
+        self.gh.side_effect = None
+        endpoint = "/orgs/example/repos?per_page=100&type=public"
+        args = ["gh", "api", "--paginate", endpoint, "--jq", ".[]", "-H", "Authorization: private-test-value"]
+        diagnostic = "first line\nsecond\tline (HTTP 403)"
+        self.gh.return_value = self.completed(args, 1, "", diagnostic)
+        with self.assertRaises(scan.GhError) as failure:
+            scan.run(args)
+        self.assertIn(endpoint, str(failure.exception))
+        self.assertIn(diagnostic, str(failure.exception))
+        self.assertNotIn("private-test-value", str(failure.exception))
+        for stdout in [None, b"\xff"]:
+            with self.subTest(stdout=stdout):
+                self.gh.return_value = self.completed(args, 0, stdout, "")
+                with self.assertRaises(scan.ScanError) as invalid_response:
+                    scan.run(args)
+                self.assertIn(endpoint, str(invalid_response.exception))
+                self.assertNotIn("private-test-value", str(invalid_response.exception))
+
+    def test_multiline_errors_roundtrip_through_tsv(self) -> None:
+        diagnostic = 'first\nsecond\tcolumn "quoted"\r\nlast (HTTP 403)'
+        self.gh.side_effect = lambda args, **kwargs: self.completed(args, 1, "", diagnostic)
+        code, stderr = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 2)
+        rows = self.rows("scan-errors")
+        self.assertEqual(len(rows), 1)
+        self.assertIn(diagnostic, rows[0]["error"])
+        self.assertIn(diagnostic, stderr)
+
     def test_utf8_repo_file_accepts_comments_and_blank_lines(self) -> None:
         path = self.root / "repos.txt"
         path.write_text("# 仓库\n\n example/retired \nexample/clean\n", encoding="utf-8")
@@ -299,8 +554,7 @@ class ScanTest(unittest.TestCase):
                 self.assertIn("scan_complete=false", stderr)
                 self.assertIn("workflows_scanned=0", stderr)
                 self.assertIn("scan_errors=1", stderr)
-                self.assertEqual(self.gh.call_count, 1)
-                self.assertEqual(self.gh.call_args.args[0][:3], ["gh", "auth", "status"])
+                self.gh.assert_not_called()
                 self.assertFalse(self.cache.exists())
                 self.assertFalse((self.out / "repo-set-retired-gh-runners-confirmed.tsv").exists())
                 errors = self.rows("scan-errors", "repo-set")
@@ -321,7 +575,7 @@ class ScanTest(unittest.TestCase):
             code, stderr = self.invoke("all", "--repo-file", str(path), "--scope-name", "repo-set")
         self.assertEqual(code, 2)
         self.assertIn("workflows_scanned=0", stderr)
-        self.assertEqual(self.gh.call_count, 1)
+        self.gh.assert_not_called()
         fetch.assert_not_called()
         self.assertEqual(findings.read_bytes(), previous)
         self.assertEqual(self.rows("scan-errors", "repo-set")[0]["stage"], "prerequisite")

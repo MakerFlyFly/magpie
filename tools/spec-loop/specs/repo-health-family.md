@@ -104,9 +104,12 @@ grouped, prioritised report → wait for confirmation before any write.
   Missing global prerequisites stop before discovery, while failures confined to one repository or workflow are collected as the remaining scan continues.
   Repository v2 and workflow v3 inventories are cached atomically only after complete, valid enumeration; older unverified inventories are rebuilt automatically.
   Cache persistence failures keep in-memory results usable while the scan reports incomplete.
-  A directory 404 is empty only after ref verification and a second 404 at the resolved commit SHA; invalid refs and malformed entries are errors.
+  A directory 404 is empty only after ref verification and a second 404 at the resolved commit SHA, or ref verification explicitly confirms an empty Git repository via HTTP 409; other conflicts, invalid refs and malformed entries are errors.
   Subprocess responses use strict UTF-8 decoding, with tolerant failure diagnostics and structured errors for missing streams.
-  Explicit repository files require UTF-8; invalid encoding is a prerequisite error with exit `2`, zero scanned workflows, and an error TSV, without treating older findings as current results.
+  Explicit repository files require UTF-8 with an optional BOM; inputs are resolved before other prerequisites so readable scopes retain consistent output prefixes on failure.
+  Invalid input encoding stops before authentication with exit `2`, zero scanned workflows, and an error TSV, without treating older findings as current results.
+  Active-account authentication falls back to hostname checks only when an older `gh` explicitly rejects `--active`; other auth failures stop the scan.
+  Organization download 404s without refresh suggest `--refresh`, while preserving manual cache refresh and original multiline diagnostics; paginated errors include their endpoint.
   `workflow-security-audit`
   keeps zizmor's error output visible; a repository whose scan exits with
   an unexpected non-zero status is listed as a scan failure with that
