@@ -5,12 +5,12 @@
 
 Behavioral evals for the `ci-runner-audit` skill.
 
-## Suites (15 cases total)
+## Suites (16 cases total)
 
 | Suite | Step | Cases | What it covers |
 |---|---|---|---|
 | step-scope-selection | Scope selection and command choice | 4 | explicit repo, ambiguous Apache project, full-org scan, prompt injection ignored |
-| step-reporting | Reporting discipline | 11 | high-confidence vs broad candidates, CI-risk language, incomplete scans, prerequisite failures, complete clean scans, unknown completeness, invalid refs, malformed entries, cache failures, partial checks |
+| step-reporting | Reporting discipline | 12 | high-confidence vs broad candidates, CI-risk language, incomplete scans, prerequisite and input-encoding failures, complete clean scans, unknown completeness, invalid refs, malformed entries, cache failures, partial checks |
 
 ## Run
 
@@ -47,3 +47,4 @@ vulnerabilities.
 It also asserts that empty findings from an incomplete scan are never reported as clean, that successful findings retain their partial-scan qualification, and that stale files after a prerequisite failure are not treated as current results.
 The discovery regressions distinguish invalid-ref 404s and malformed workflow-list entries from absent workflows.
 Cache-publication and individual-check failures keep their successful findings reportable as partial results, even when all files were enumerated or no file completed every check.
+Invalid repo-file encoding stops before repository discovery; previous findings files are not results of that failed invocation.

@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 2848
+measured_tokens: 2916
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -194,6 +194,9 @@ skills/ci-runner-audit/scripts/scan_ci_runners.py all \
 
 For only one check, replace `all` with `retired` or `macos-arch`.
 
+`--repo-file` requires UTF-8 text, with one `owner/repo` per line; blank lines and `#` comments are ignored.
+Invalid input encoding is a global prerequisite failure: exit `2`, zero workflows scanned, and a scan-errors TSV with the UTF-8 requirement.
+
 Use `--refresh` for org scans when cached repo/workflow inventory may be
 stale. Explicit `--repo` and `--repo-file` scans fetch repository
 metadata directly.
@@ -267,7 +270,7 @@ If the exit status is non-zero, `scan_complete=false`, or `scan_errors>0`, repor
 Never describe an incomplete audit as clean or claim the scope has no issues, even when its findings TSVs are empty.
 Report a clean scan only when the command succeeded, `scan_complete=true`, `scan_errors=0`, and there are no findings.
 When completion evidence is missing, state that completeness is unknown.
-If a global prerequisite or org discovery failure stopped the run before workflow checks, existing findings files in the output directory are not results of the failed invocation.
+If a global prerequisite (including invalid repo-file encoding) or org discovery failure stopped the run before workflow checks, existing findings files in the output directory are not results of the failed invocation.
 
 Use conservative language: these findings are CI breakage or
 portability risks, not security vulnerabilities.

@@ -230,7 +230,11 @@ def load_repo(full_name: str) -> dict:
 
 def load_repo_file(path: Path) -> list[str]:
     repos = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError as exc:
+        raise ScanError(f"Repository file {path} must use UTF-8 encoding: {exc}") from exc
+    for line in text.splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
             repos.append(line)
@@ -251,12 +255,17 @@ def workflow_contents(full_name: str, branch: str) -> object:
         # A directory 404 can mean an inaccessible repository or an invalid ref.
         # Resolve the ref, then retry at that immutable commit before accepting absence.
         try:
-            commit = gh_json(f"repos/{full_name}/commits/{quote(branch, safe='')}")
-            if not isinstance(commit, dict) or not isinstance(commit.get("sha"), str):
-                raise ScanError("Unexpected ref-validation response")
-            sha = commit["sha"]
+            sha = run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{full_name}/commits/{quote(branch, safe='')}",
+                    "-H",
+                    "Accept: application/vnd.github.sha",
+                ]
+            ).strip()
             if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
-                raise ScanError("Ref-validation response must include a commit SHA")
+                raise ScanError("Ref-validation response must be a 40-character hexadecimal commit SHA")
         except Exception as validation_error:
             raise ScanError(f"{exc}; cannot verify ref {branch}: {validation_error}") from validation_error
         try:

@@ -106,6 +106,7 @@ grouped, prioritised report → wait for confirmation before any write.
   Cache persistence failures keep in-memory results usable while the scan reports incomplete.
   A directory 404 is empty only after ref verification and a second 404 at the resolved commit SHA; invalid refs and malformed entries are errors.
   Subprocess responses use strict UTF-8 decoding, with tolerant failure diagnostics and structured errors for missing streams.
+  Explicit repository files require UTF-8; invalid encoding is a prerequisite error with exit `2`, zero scanned workflows, and an error TSV, without treating older findings as current results.
   `workflow-security-audit`
   keeps zizmor's error output visible; a repository whose scan exits with
   an unexpected non-zero status is listed as a scan failure with that

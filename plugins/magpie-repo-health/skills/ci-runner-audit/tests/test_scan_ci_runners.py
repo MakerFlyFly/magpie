@@ -58,7 +58,7 @@ class ScanTest(unittest.TestCase):
         self.invalid_json = False
         self.branch = "main"
         self.sha = "a" * 40
-        self.commit_response: object = {"sha": self.sha}
+        self.commit_response: str | bytes | None = self.sha
         self.ref_failures: dict[str, int] = {}
         self.retry_recovers = False
         self.retry_failure: int | None = None
@@ -95,7 +95,12 @@ class ScanTest(unittest.TestCase):
             repo = endpoint.removeprefix("repos/").split("/commits/")[0]
             if repo in self.ref_failures:
                 return self.completed(args, 1, "", f"gh: ref inaccessible (HTTP {self.ref_failures[repo]})")
-            return self.completed(args, 0, json.dumps(self.commit_response), "")
+            commit_output = (
+                self.commit_response
+                if "Accept: application/vnd.github.sha" in args
+                else json.dumps({"sha": self.sha})
+            )
+            return self.completed(args, 0, commit_output, "")
         if "/contents/" in endpoint:
             repo = endpoint.removeprefix("repos/").split("/contents/")[0]
             if repo in self.list_failures:
@@ -269,6 +274,58 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(self.gh.call_count, 1)
         self.assertFalse(self.cache.exists())
 
+    def test_utf8_repo_file_accepts_comments_and_blank_lines(self) -> None:
+        path = self.root / "repos.txt"
+        path.write_text("# 仓库\n\n example/retired \nexample/clean\n", encoding="utf-8")
+        code, stderr = self.invoke("all", "--repo-file", str(path))
+        self.assertEqual(code, 0)
+        self.assertIn("workflows_scanned=2", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "repo-set")), 1)
+        self.assertEqual(self.rows("scan-errors", "repo-set"), [])
+
+    def test_non_utf8_repo_files_are_prerequisite_errors(self) -> None:
+        path = self.root / "repos.txt"
+        contents = {
+            "invalid-byte": b"example/retired\n\xff\n",
+            "utf16": "example/retired\n".encode("utf-16"),
+            "gbk-comment": "# 仓库\nexample/retired\n".encode("gbk"),
+        }
+        for name, content in contents.items():
+            with self.subTest(encoding=name):
+                path.write_bytes(content)
+                self.gh.reset_mock()
+                code, stderr = self.invoke("all", "--repo-file", str(path))
+                self.assertEqual(code, 2)
+                self.assertIn("scan_complete=false", stderr)
+                self.assertIn("workflows_scanned=0", stderr)
+                self.assertIn("scan_errors=1", stderr)
+                self.assertEqual(self.gh.call_count, 1)
+                self.assertEqual(self.gh.call_args.args[0][:3], ["gh", "auth", "status"])
+                self.assertFalse(self.cache.exists())
+                self.assertFalse((self.out / "repo-set-retired-gh-runners-confirmed.tsv").exists())
+                errors = self.rows("scan-errors", "repo-set")
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(errors[0]["stage"], "prerequisite")
+                self.assertIn("must use UTF-8", errors[0]["error"])
+                self.assertIn(str(path), errors[0]["error"])
+
+    def test_invalid_repo_file_does_not_reuse_old_findings(self) -> None:
+        path = self.root / "repos.txt"
+        path.write_text("example/retired\n", encoding="utf-8")
+        self.assertEqual(self.invoke("all", "--repo-file", str(path), "--scope-name", "repo-set")[0], 0)
+        findings = self.out / "repo-set-retired-gh-runners-confirmed.tsv"
+        previous = findings.read_bytes()
+        path.write_bytes(b"\xff")
+        self.gh.reset_mock()
+        with mock.patch.object(scan, "fetch_text", wraps=scan.fetch_text) as fetch:
+            code, stderr = self.invoke("all", "--repo-file", str(path), "--scope-name", "repo-set")
+        self.assertEqual(code, 2)
+        self.assertIn("workflows_scanned=0", stderr)
+        self.assertEqual(self.gh.call_count, 1)
+        fetch.assert_not_called()
+        self.assertEqual(findings.read_bytes(), previous)
+        self.assertEqual(self.rows("scan-errors", "repo-set")[0]["stage"], "prerequisite")
+
     def test_missing_gh_fails_before_listing(self) -> None:
         with mock.patch.object(scan.subprocess, "run", side_effect=FileNotFoundError("gh unavailable")):
             code, stderr = self.invoke("retired", "--repo", "example/retired")
@@ -411,7 +468,7 @@ class ScanTest(unittest.TestCase):
 
     def test_404_ref_validation_rejects_abnormal_responses(self) -> None:
         self.list_failures = {"example/retired": 404}
-        responses: list[object] = [None, [], {}, {"sha": None}, {"sha": "main"}, {"sha": 123}]
+        responses = ["", " \n\t", "a" * 39, "a" * 41, "g" * 40, json.dumps({"sha": self.sha})]
         for response in responses:
             with self.subTest(response=response):
                 self.commit_response = response
@@ -419,20 +476,31 @@ class ScanTest(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("cannot verify ref", stderr)
                 self.assertIn("listing failed (HTTP 404)", stderr)
+                self.assertEqual(self.rows("scan-errors")[0]["stage"], "workflow-list")
+                self.assertFalse(any(f"ref={self.sha}" in call.args[0][2] for call in self.gh.call_args_list))
 
-    def test_404_ref_validation_rejects_invalid_json(self) -> None:
+    def test_404_ref_validation_rejects_invalid_utf8_and_missing_stdout(self) -> None:
         self.list_failures = {"example/retired": 404}
-        response = self.gh_run
+        for response in [b"\xff", None]:
+            with self.subTest(response=response):
+                self.commit_response = response
+                code, stderr = self.invoke("retired", "--repo", "example/retired")
+                self.assertEqual(code, 1)
+                self.assertIn("cannot verify ref", stderr)
+                self.assertIn("listing failed (HTTP 404)", stderr)
+                self.assertEqual(self.rows("scan-errors")[0]["stage"], "workflow-list")
 
-        def invalid_ref_json(args, **kwargs):
-            if "/commits/" in args[2]:
-                return self.completed(args, 0, "invalid JSON", "")
-            return response(args, **kwargs)
-
-        self.gh.side_effect = invalid_ref_json
-        code, stderr = self.invoke("retired", "--repo", "example/retired")
-        self.assertEqual(code, 1)
-        self.assertIn("cannot verify ref", stderr)
+    def test_404_ref_validation_accepts_sha_text_with_surrounding_whitespace(self) -> None:
+        self.sha = "Ab" * 20
+        self.commit_response = f" \n{self.sha}\t\n"
+        self.list_failures = {"example/retired": 404}
+        code, stderr = self.invoke("all", "--repo", "example/retired")
+        self.assertEqual(code, 0)
+        self.assertIn("scan_complete=true", stderr)
+        self.assertEqual(self.rows("scan-errors"), [])
+        api_calls = [call.args[0] for call in self.gh.call_args_list if call.args[0][1] == "api"]
+        self.assertEqual(len(api_calls), 4)  # Metadata, directory, ref, SHA directory.
+        self.assertEqual(api_calls[-1][2], f"repos/example/retired/contents/.github/workflows?ref={self.sha}")
 
     def test_404_retry_at_verified_sha_can_recover(self) -> None:
         self.list_failures = {"example/retired": 404}
