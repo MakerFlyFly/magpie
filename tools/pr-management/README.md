@@ -15,6 +15,13 @@
     - [`triage guard` — the pre-mutation checks](#triage-guard--the-pre-mutation-checks)
     - [`triage session record` / `triage session summary`](#triage-session-record--triage-session-summary)
     - [`stats build` — the pr-management-stats dashboard](#stats-build--the-pr-management-stats-dashboard)
+    - [`quick-merge screen` — pr-management-quick-merge](#quick-merge-screen--pr-management-quick-merge)
+    - [`stale-sweep` — pr-stale-sweep](#stale-sweep--pr-stale-sweep)
+    - [`stack-review` — pr-management-stack-review](#stack-review--pr-management-stack-review)
+    - [`code-review` — pr-management-code-review](#code-review--pr-management-code-review)
+    - [`mentor` — pr-management-mentor](#mentor--pr-management-mentor)
+    - [`reviewer-routing` — reviewer-routing](#reviewer-routing--reviewer-routing)
+    - [`pre-first-pr` — pre-first-pr-check](#pre-first-pr--pre-first-pr-check)
     - [`config`](#config)
   - [Shared rules](#shared-rules)
   - [What it reads](#what-it-reads)
@@ -164,6 +171,105 @@ After a first `gh gist create`, `pr-management stats record-gist <id>` stores th
 CODEOWNERS is read from the adopter checkout (`.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`).
 `--fetch-with-gh [--repo owner/name]` fetches through `gh` directly instead of the saved files, for a CI job outside the sandbox; it uses the search index for closed PRs.
 
+### `quick-merge screen` — pr-management-quick-merge
+
+```bash
+uv run --project <framework>/tools/pr-management pr-management quick-merge screen --saved-dir <workspace>/saved [--tier A|B] [--max-churn N] [--pr N] [--session <file>]
+uv run --project <framework>/tools/pr-management pr-management quick-merge approve-check --saved-dir <workspace>/saved --pr N --head <sha> [--session <file>] [--out-dir <dir>]
+uv run --project <framework>/tools/pr-management pr-management quick-merge session view|approve --session <file> --pr N --head <sha>
+```
+
+`screen` applies Stage 1 (gates G1→G7: ready label, real CI green, no failed or pending checks, no pending workflow approval, no batch conflict, no unresolved collaborator thread, no changes requested after the last commit), Stage 2 (`max_churn` / `max_files`, deny before allow, tier A/B) and Stage 3 (the live `pr-live-state` read: `clean` / `has_hooks` / `unstable` / `behind` → ready; `blocked` + `REVIEW_REQUIRED` → needs approval; `dirty` → `gate:G5-conflict`; other `blocked` → `gate:G5-blocked`; unknown → `gate:G5-unknown`) over `express-ready.json`, ranks the ready PRs (tier A, churn, oldest) and prints each merge command for the maintainer to run.
+Globs: `**` is any number of segments, other segments are `fnmatch`, case-sensitive.
+`approve-check` enforces the approve protocol (head lock, gates re-checked, diff viewed this session) and prints the `gh pr review` command.
+It prints `{ready, needs_approval, drops, drop_reasons, needs, prefetch, handoff, summary, docs, warnings}`; every printed command is built with `shlex.join`.
+
+### `stale-sweep` — pr-stale-sweep
+
+```bash
+uv run --project <framework>/tools/pr-management pr-management stale-sweep plan <selector...>
+uv run --project <framework>/tools/pr-management pr-management stale-sweep classify --saved-dir <workspace>/saved [--now <iso>] <selector...>
+uv run --project <framework>/tools/pr-management pr-management stale-sweep render --saved-dir <workspace>/saved --pr N --out-dir <dir>
+uv run --project <framework>/tools/pr-management pr-management stale-sweep record --session <file> --pr N --class <class> --outcome posted|closed|skipped|failed [--comment-url <url>]
+uv run --project <framework>/tools/pr-management pr-management stale-sweep recap --session <file> --saved-dir <workspace>/saved
+```
+
+`plan` resolves the selector and thresholds (`pr_warn_days` / `pr_close_days` / `pr_hard_close_days`, default 45 / 90 / 180) and lists the reads to save.
+`classify` measures inactivity from the last real activity — never the sweep's own comments — and sorts every PR into `REQUEST-UPDATE`, `CLOSE-STALE` (only after a standing nudge at least 7 days old, or past the hard-close threshold), `SKIP-NUDGE-PENDING`, `SKIP-SECURITY`, `SKIP-MAINTAINER-COURT`, `SKIP-READY-LABEL` or `SKIP-NO-TIMESTAMPS`, reusing the triage maintainer-court, ready-label, security and bot rules.
+It reports `over_cap` instead of truncating.
+`render` writes the comment (author-only mention, linked references) and the `shlex.join`-built `gh` commands; `recap` prints the counts with every PR linked.
+
+### `stack-review` — pr-management-stack-review
+
+```bash
+uv run --project <framework>/tools/pr-management pr-management stack-review resolve --saved-dir <workspace>/saved --viewer <login> (--pr N | --stack S) [--clone <dir>]
+uv run --project <framework>/tools/pr-management pr-management stack-review findings --chain <file> --seams <file> --floors <file> --ledger <file> [--no-fetch]
+uv run --project <framework>/tools/pr-management pr-management stack-review verdict --findings <file> --ledger <file>
+uv run --project <framework>/tools/pr-management pr-management stack-review post --saved-dir <workspace>/saved --viewer <login> --resolved <file> --recheck <file> --body-file <file> [--dry-run]
+uv run --project <framework>/tools/pr-management pr-management stack-review residue-command --clone <dir> --prefix <p> --size <n> --variant <v>...
+```
+
+`resolve` walks the stack and the trunk chain, decides the gate and stop reasons, the lowest open layer, the CI cells and the size line, and prints the fetch, diff and cleanup commands.
+`findings` maps the detectors' output to finding classes and severities, separating what still needs judgement; `verdict` computes the verdict and sorts the findings; `post` finds the marker comment, flags foreign markers, compares heads and prints the post commands.
+The detectors run as `python -m pr_management.stack_review.stack_chain` / `stack_ledger` on the local clone.
+Every printed command is built with `shlex.join`.
+
+### `code-review` — pr-management-code-review
+
+```bash
+uv run --project <framework>/tools/pr-management pr-management code-review <subcommand> --saved-dir <workspace>/saved ...
+```
+
+| Subcommand | Prints |
+|---|---|
+| `resolve`, `queue` | the ordered review queue with match chips and skip reasons (the five "my reviews" signals and every selector) |
+| `context` | the PR headline, the slop signals, the security and AI-disclosure scans, the `AGENTS.md` files that apply, the real-CI result |
+| `slop-outcome` | the slop outcome once the agent has judged H1, H5 and S2 |
+| `deps` | the dependency-constraint ledger: `broken`, `compatible` or `unknown` |
+| `disposition` | `APPROVE` / `REQUEST_CHANGES` / `COMMENT`, the footer variant and any conflict note |
+| `reviewers` | ranked reviewer suggestions |
+| `render` | the review body file, the payload file, inline anchors (line, side, position) and the `shlex.join`-built post command |
+| `pick` | the parsed picker choice |
+| `mention-scan`, `verify-footer` | live `@`-mentions in a draft; whether the footer matches the template |
+| `guard` | the head-SHA recheck before posting |
+| `slop-comment` | the slop-warning body and its `gh pr comment` command |
+| `session record`, `session summary` | the session counts and summary text |
+
+When a saved read is missing, a subcommand returns `needs: [{op, params, save, why}]`; the skill runs each bare `vetted-op-read --save` and re-runs it.
+The agent keeps reading the diff, writing findings and judging severity.
+
+### `mentor` — pr-management-mentor
+
+```bash
+uv run --project <framework>/tools/pr-management pr-management mentor config
+uv run --project <framework>/tools/pr-management pr-management mentor assess --saved-dir <workspace>/saved --kind pr|issue --number N --viewer <login>
+uv run --project <framework>/tools/pr-management pr-management mentor render --kind missing-repro|missing-version|convention-pointer|why-question|hand-off [--author <login>] [--pointer <url>] [--open-question-file <file>] --out <file>
+uv run --project <framework>/tools/pr-management pr-management mentor tone-check --draft <file> --author <login>
+uv run --project <framework>/tools/pr-management pr-management mentor log --kind pr|issue --number N --outcome posted|discarded|declined --trigger <t>
+```
+
+`assess` checks the hand-off triggers in the order 4 → 3 → 1 → 2, then whether a maintainer is engaged, and returns `config_error`, `handoff`, `maintainer_engaged` or `draft` with the pointers and the documents to read.
+`render` refuses a half-rendered body and runs the deterministic tone rules; `tone-check` runs them on a draft.
+
+### `reviewer-routing` — reviewer-routing
+
+```bash
+uv run --project <framework>/tools/pr-management pr-management reviewer-routing preflight --target <ref> --privacy-exit <code> [--privacy-message <text>]
+uv run --project <framework>/tools/pr-management pr-management reviewer-routing propose --target <ref> --saved-dir <workspace>/saved [--area <a>...] [--no-codeowners] [--injection]
+```
+
+`propose` returns `needs` until every read is saved, then the primary, the backup, every candidate's score and the proposal text.
+
+### `pre-first-pr` — pre-first-pr-check
+
+```bash
+uv run --project <framework>/tools/pr-management pr-management pre-first-pr check --repo-dir <checkout> [--base <ref>] [--path <p>...] --out <file>
+uv run --project <framework>/tools/pr-management pr-management pre-first-pr report --check <file> --judgement <file>
+```
+
+`check` runs read-only `git` locally and scores categories A (SPDX header in the first ten lines, licence from `project.md`), B2 (AI `Co-Authored-By`), B3 (the attribution convention, resolved like the agent-guard), C (declared placeholders) and D (binaries, `.env*`, token-like strings, files over 1 MB).
+`report` merges the agent's judgement on B1, B3, D's wording and E and prints the readiness signal; a category that never ran counts as blocking.
+
 ### `config`
 
 Prints the resolved configuration — useful when a value is not the one expected.
@@ -192,7 +298,10 @@ Other skills link here instead of restating them; change a rule in code and here
 - **Systemic failure** — a check name failing on at least two of the ten most recently merged PRs.
 - **Mergeability** — `UNKNOWN` is "not yet computed", never "mergeable": passing needs `MERGEABLE`, and every guard refuses on `UNKNOWN`.
 - **Strip-ready-on-downgrade** — a ready-labelled PR that regresses into a `deterministic_flag` `draft` / `comment` / `close` loses the label, unless a collaborator thread is open (a merit discussion): then `draft` becomes feedback only, `close` delivers its reasoning and label but leaves the PR open, and the label stays.
+- **Mentions** ([`mentions.py`](src/pr_management/mentions.py)) — every renderer (triage notes, stale-sweep comments, mentor comments, code-review bodies) keeps only the PR author live and backtick-quotes every other handle, except those in `mention_allowlist` (`pr-management-config.md`) and those one call adds with `--allow-mention <login>`.
+  The agent-guard `mention` guard honours `mention_allowlist` only from `.apache-magpie-overrides/pr-management-config.md` as GitHub serves it from the target repository's default branch, so a local edit or commit does not widen it; a per-call addition also needs `MAGPIE_ALLOW_MENTIONS=1` on the posting command.
 - **Reason strings** — one line, factual, signal first and proposal verb last; no emoji, no editorialising, no generated prose. The table's templates are the whole surface.
+- **Routing score** — area 3 each (cap 6), familiarity 2 per path (cap 6), CODEOWNERS 2, load −1 per review above 2 (floor −5); an OVERLOADED member is never the primary.
 
 ## What it reads
 

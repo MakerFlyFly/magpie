@@ -88,28 +88,37 @@ same directory; the behaviour is unchanged.
   code review one PR at a time; applies project criteria and drafts an
   `APPROVE` / `REQUEST_CHANGES` / `COMMENT` review with inline comments;
   posts on maintainer confirmation. Ships `mode: Triage` + `experimental`.
-  Detail files include `prerequisites.md`, `selectors.md`, `review-flow.md`,
-  `review-loop.md`, `criteria.md`, `slop-detection.md`, `adversarial.md`,
-  and `posting.md`.
+  Selection, scans, the slop threshold, disposition, inline anchoring and the
+  review payload run as code in `pr_management.code_review`; the agent judges
+  H1/H5/S2, writes the findings and assigns severity. Detail files include
+  `prerequisites.md`, `review-flow.md`, `review-loop.md`, `criteria.md`,
+  `adversarial.md`, `posting.md`, one file per outcome under
+  `classifications/` and per category under `criteria/`.
 - Skill: `pr-management-stack-review` (`stack-review/`) — stack-level review
   of a GitHub stacked pull request. Resolves the stack from a member PR or
   its stack number, fetches the layer heads into `refs/magpie-stack/<S>/*`
-  (proposed once, cleaned up at the end), and runs two stdlib scripts:
-  `scripts/stack_ledger.py` (file-by-layer matrix, hunk-shape mechanical
-  detection, outliers, duplicate release notes, regenerated generated
-  files, lock-without-manifest, reading plan and coverage table) and
-  `scripts/stack_chain.py` (chain currency, merge commits, trunk drift,
-  removed-definition seams at the layer's own head, later heads and new
-  trunk uses). Code is read by tier; the report carries the coverage
+  (proposed once, cleaned up at the end), and runs the detectors in
+  `tools/pr-management` (`pr_management.stack_review.stack_ledger`: file-by-layer
+  matrix, hunk-shape mechanical detection, outliers, duplicate release notes,
+  regenerated generated files, lock-without-manifest, reading plan and coverage
+  table; `stack_chain`: chain currency, merge commits, trunk drift,
+  removed-definition seams at the layer's own head, later heads and new trunk
+  uses); resolve, findings mapping, verdict and posting are
+  `pr-management stack-review` subcommands. Code is read by tier; the report carries the coverage
   table. Posts one rolling `COMMENT` on the lowest open layer (marker,
   updated in place) and never a review event. Ships `mode: Triage` +
-  `experimental`. Detail files: `resolve.md`, `detectors.md`, `tiers.md`,
-  `report.md`, `adopter-config.md`, `invocation.md`; tests under `tests/`.
+  `experimental`. Detail files: `tiers.md`, `report.md`, `adopter-config.md`,
+  `invocation.md`, and one file per finding class / verdict / step outcome
+  under `classifications/`; tests under `tools/pr-management/tests/stack_review/`.
 - Skill: `pr-management-quick-merge` — read-only express-lane screener
   for trivial, low-risk PRs (docs, changelog, translations, tests) that
   pass every quality gate; surfaces ranked candidates with diff summaries
   and the exact merge command. Never merges autonomously. Ships `mode:
   Triage` + `experimental`.
+  The screen runs as code (`pr-management quick-merge screen` / `approve-check`)
+  over reads saved with `vetted-op-read --save`; one file per gate, bucket,
+  tier and drop reason under `classifications/`, and
+  `actions/{present,approve,hand-off}.md`.
 - Skill: `pr-management-mentor` — drafts a teaching-register comment on a
   single GitHub issue or PR thread; waits for explicit maintainer
   confirmation before posting. Ships `mode: Mentoring` + `experimental`.
@@ -121,6 +130,10 @@ same directory; the behaviour is unchanged.
   `reviewer-routing` (`mode: Triage`; [reviewer routing](reviewer-routing.md)),
   and `pre-first-pr-check` (`mode: Pairing`, read-only newcomer checklist on a
   local branch; [pairing mode](pairing-mode.md)).
+  `pr-management-mentor`, `reviewer-routing` and `pre-first-pr-check` run their
+  rules in `tools/pr-management` (`mentor assess|render|tone-check|log`,
+  `reviewer-routing preflight|propose`, `pre-first-pr check|report`); their
+  detail files are per-classification under `classifications/`.
 - Family README: `docs/pr-management/README.md` — family overview, skill
   table, adopter-config scaffold.
 - Tool: `tools/pr-management/` (`pr_management.stats`) — deterministic Python backing for
@@ -226,6 +239,12 @@ same directory; the behaviour is unchanged.
   was posted after the latest author push, and is less than 72 hours old.
   Regression cases: the F5a tests in
   `tools/pr-management/tests/test_triage_classify.py`.
+- **Stale-sweep rules run as code.** `pr-management stale-sweep classify`
+  measures inactivity from the last real activity (never the sweep's own
+  comments), nudges before it closes (hard close excepted, with at least a
+  7-day notice), and reuses triage's maintainer-court, ready-label, security
+  and bot rules; the close notice carries `<!-- pr-stale-sweep-close -->`.
+  Regression cases: `tools/pr-management/tests/stale_sweep/`.
 - **Quick-merge never merges.** `pr-management-quick-merge` surfaces
   candidates and the maintainer runs the exact `gh pr merge` command
   themselves. Automated merge belongs to a future Auto-merge mode that is

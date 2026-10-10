@@ -14,6 +14,7 @@
   - [CLI](#cli)
     - [Saving a read instead of printing it](#saving-a-read-instead-of-printing-it)
     - [The pr-management-triage reads](#the-pr-management-triage-reads)
+    - [The other pr-management reads](#the-other-pr-management-reads)
     - [The pr-management-stats reads](#the-pr-management-stats-reads)
   - [Tracker procedures: rollup and body-field writes](#tracker-procedures-rollup-and-body-field-writes)
   - [Wiring it into settings](#wiring-it-into-settings)
@@ -235,10 +236,42 @@ board_status_field_id = "PVTSSF_…"    # its Status field id
                                "pr-search-review-requested", "pr-search-mentions",
                                "pr-search-reviewed-by", "pr-search-team-review-requested",
                                "commits-by-path", "repo-file", "label-list",
-                               "gql-pr-review-threads", "pr-review-approve",
+                               "gql-pr-review-threads", "team-members", "gql-pr-liveness", "gql-cr-open", "gql-cr-pr", "gql-cr-pr-stack", "cr-codeowners-github", "cr-codeowners-root", "cr-codeowners-docs", "cr-pr-template", "cr-viewer-commits", "cr-commit-files", "cr-path-commits", "cr-commit-pulls",
+                               "pr-review-approve",
                                "pr-review-request-changes", "pr-review-comment"]
 "pr-management-stats"   = ["viewer", "gql-pr-stats-open", "gql-pr-stats-closed-page",
                            "gql-pr-stats-closed-search", "team-members"]
+"pr-management-quick-merge" = ["viewer",
+                               "gql-pr-triage-preflight",
+                               "gql-pr-express-ready",
+                               "gql-pr-express-one",
+                               "pr-live-state",
+                               "gql-pr-review-decision",
+                               "runs-action-required",
+                               "pr-diff"]
+"pr-stale-sweep" = ["gql-pr-stale-open",
+                    "gql-pr-stale-label",
+                    "gql-pr-stale-one",
+                    "team-members",
+                    "upstream-permission"]
+"pr-management-stack-review" = ["viewer",
+                                "upstream-permission",
+                                "gql-stack-of-pr",
+                                "gql-stack-scan",
+                                "gql-pr-by-head",
+                                "pr-checks",
+                                "pr-comments"]
+"pr-management-mentor" = ["viewer",
+                          "repo-issue-view",
+                          "pr-view-with-body",
+                          "pr-comments",
+                          "team-members",
+                          "upstream-permission"]
+"reviewer-routing" = ["pr-view-with-body",
+                      "repo-issue-view",
+                      "commits-by-path",
+                      "pr-search-review-requested",
+                      "repo-file"]
 "issue-triage"          = ["repo-issue-view", "repo-issue-comments", "repo-issue-list",
                            "repo-issue-add-label", "repo-issue-remove-label",
                            "repo-issue-comment"]
@@ -362,6 +395,32 @@ kilobytes — which a deterministic tool then reads from the file.
 
 The search string is built by the operation, `repo:<upstream>` first, so the
 selector parameter narrows a sweep and cannot re-aim it.
+
+### The other pr-management reads
+
+| Operation | Parameters | Returns | Skill |
+|---|---|---|---|
+| `gql-pr-express-ready` | `label` (policy `upstream_labels`) | the open PRs carrying that label in the triage shape plus each PR's changed files, every page | quick-merge |
+| `gql-pr-express-one` | `number` | one PR in the same shape | quick-merge |
+| `gql-pr-review-decision` | `number` | review decision, approvals so far, and the base branch's required approving-review count | quick-merge |
+| `pr-live-state` | `number` | live `{number, head_sha, mergeable, mergeable_state}` (REST computes mergeability on demand) | quick-merge |
+| `gql-pr-stale-open` | — | every open, non-draft PR in the pr-stale-sweep shape (raw comment bodies), all pages | pr-stale-sweep |
+| `gql-pr-stale-label` | `label` (policy `upstream_labels`) | the same, narrowed to one label | pr-stale-sweep |
+| `gql-pr-stale-one` | `number` | one PR in the same shape | pr-stale-sweep |
+| `gql-stack-of-pr` | `number` | the stack a member PR belongs to, every entry | stack-review |
+| `gql-stack-scan` | — | every open PR's stack number, all pages | stack-review |
+| `gql-pr-by-head` | `head` | open PRs whose head is one branch (the trunk walk) | stack-review |
+| `gql-cr-open` | — | every open PR in the code-review queue shape, all pages | code-review |
+| `gql-cr-pr` | `number` | one PR's review context: headline, files, threads, reviews, checks | code-review |
+| `gql-cr-pr-stack` | `number` | the stack a PR belongs to, for stacked-layer reviews | code-review |
+| `cr-codeowners-github` | — | `.github/CODEOWNERS` from the default branch | code-review |
+| `cr-codeowners-root` | — | `CODEOWNERS` at the repository root | code-review |
+| `cr-codeowners-docs` | — | `docs/CODEOWNERS` | code-review |
+| `cr-pr-template` | — | the repository's pull-request template | code-review |
+| `cr-viewer-commits` | `login date ref` | the viewer's commits on the base branch since a date | code-review |
+| `cr-commit-files` | `commit_hash` | the files a commit touched | code-review |
+| `cr-path-commits` | `path` | the commits that touched a path | code-review |
+| `cr-commit-pulls` | `commit_hash` | the merged PRs a commit belongs to | code-review |
 
 ### The pr-management-stats reads
 

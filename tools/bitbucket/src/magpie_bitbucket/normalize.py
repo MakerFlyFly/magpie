@@ -507,8 +507,13 @@ def declined_pull_request(
 def merged_pull_request(
     kind: str,
     raw: dict[str, Any],
+    operation: str = "pull-request-merge",
 ) -> dict[str, Any]:
-    """Normalize a pull-request merge submission."""
+    """Normalize a pull-request merge submission, or a later read of its merge task.
+
+    ``operation`` names what the caller did, so a status poll is never
+    reported as a merge submission; the merge fields share one vocabulary.
+    """
     result = raw.get("result")
     result_data = result if isinstance(result, dict) else {}
 
@@ -542,7 +547,7 @@ def merged_pull_request(
     return {
         "ok": True,
         "backend": ("bitbucket-cloud" if kind == "cloud" else "bitbucket-datacenter"),
-        "operation": "pull-request-merge",
+        "operation": operation,
         "pull_request_id": _string(raw.get("pull_request_id")),
         "strategy": _string(raw.get("strategy")),
         "backend_strategy": _string(raw.get("backend_strategy")),

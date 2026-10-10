@@ -508,6 +508,32 @@ def merge_pull_request(
     }
 
 
+def get_pull_request_merge_task_status(
+    config: BitbucketConfig,
+    pull_request_id: str,
+    task_id: str,
+) -> dict[str, Any]:
+    """Fetch the status of one asynchronous Bitbucket Cloud merge task."""
+    workspace = quote_path(require(config.workspace, "BITBUCKET_WORKSPACE"))
+    repo_slug = quote_path(require(config.repo_slug, "BITBUCKET_REPO_SLUG"))
+    pr_id = quote_path(pull_request_id)
+    merge_task_id = quote_path(task_id)
+
+    url = (
+        f"{CLOUD_API_BASE}/repositories/{workspace}/{repo_slug}/"
+        f"pullrequests/{pr_id}/merge/task-status/{merge_task_id}"
+    )
+
+    result = get_json(url, config)
+
+    return {
+        "pull_request_id": pull_request_id,
+        "task_id": task_id,
+        "task_url": url,
+        "result": result,
+    }
+
+
 def get_pull_request_reviews(config: BitbucketConfig, pull_request_id: str) -> dict[str, Any]:
     """Fetch review-state activity for a Bitbucket Cloud pull request."""
     pull_request = get_pull_request(config, pull_request_id)

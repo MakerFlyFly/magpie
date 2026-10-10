@@ -377,6 +377,16 @@ def merge_pull_request(
     )
 
 
+def get_pull_request_merge_task_status(
+    config: BitbucketConfig,
+    pull_request_id: str,
+    task_id: str,
+) -> dict[str, Any]:
+    """Reject Cloud merge-task status reads for Bitbucket Data Center."""
+    _ = (config, pull_request_id, task_id)
+    raise BitbucketError("Bitbucket Data Center pull request merge task-status reads are not supported")
+
+
 def get_pull_request_reviews(config: BitbucketConfig, pull_request_id: str) -> dict[str, Any]:
     """Fetch review-state activity for a Bitbucket Data Center pull request."""
     pull_request = get_pull_request(config, pull_request_id)

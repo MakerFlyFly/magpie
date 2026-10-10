@@ -4098,3 +4098,184 @@ def test_cloud_merge_pull_request_reports_backend_strategy(
 
     assert (result["strategy"], result["backend_strategy"]) == ("rebase", "rebase_fast_forward")
     assert merged_pull_request("cloud", result)["backend_strategy"] == "rebase_fast_forward"
+
+
+@patch("magpie_bitbucket.client.urllib.request.build_opener")
+def test_cloud_get_pull_request_merge_task_status_pending(
+    mock_build_opener: MagicMock,
+    cloud_env: None,
+) -> None:
+    mock_opener(
+        mock_build_opener,
+        {
+            "task_status": "PENDING",
+            "links": {
+                "self": {
+                    "href": (
+                        "https://api.bitbucket.org/2.0/repositories/apache/magpie/"
+                        "pullrequests/7/merge/task-status/task-123"
+                    ),
+                },
+            },
+        },
+    )
+
+    result = cloud.get_pull_request_merge_task_status(
+        load_config(),
+        "7",
+        "task-123",
+    )
+
+    request = mock_build_opener.return_value.open.call_args.args[0]
+
+    assert request.get_method() == "GET"
+    assert request.full_url == (
+        "https://api.bitbucket.org/2.0/repositories/apache/magpie/pullrequests/7/merge/task-status/task-123"
+    )
+    assert result["pull_request_id"] == "7"
+    assert result["task_id"] == "task-123"
+    assert result["result"]["task_status"] == "PENDING"
+
+    normalized = merged_pull_request("cloud", result)
+
+    assert normalized["merge_status"] == "submitted"
+    assert normalized["task_status"] == "PENDING"
+    assert normalized["landed_ref"] is None
+
+
+@patch("magpie_bitbucket.client.urllib.request.build_opener")
+def test_cloud_get_pull_request_merge_task_status_success(
+    mock_build_opener: MagicMock,
+    cloud_env: None,
+) -> None:
+    mock_opener(
+        mock_build_opener,
+        {
+            "task_status": "SUCCESS",
+            "merge_result": {
+                "id": 7,
+                "state": "MERGED",
+                "merge_commit": {
+                    "hash": "abc123def456",
+                },
+            },
+        },
+    )
+
+    result = cloud.get_pull_request_merge_task_status(
+        load_config(),
+        "7",
+        "task-123",
+    )
+
+    normalized = merged_pull_request("cloud", result)
+
+    assert normalized["merge_status"] == "merged"
+    assert normalized["task_status"] == "SUCCESS"
+    assert normalized["landed_ref"] == "abc123def456"
+
+
+@pytest.mark.parametrize("task_status", ["FAILED", "ERROR"])
+@patch("magpie_bitbucket.client.urllib.request.build_opener")
+def test_cloud_get_pull_request_merge_task_status_failed(
+    mock_build_opener: MagicMock,
+    cloud_env: None,
+    task_status: str,
+) -> None:
+    mock_opener(mock_build_opener, {"task_status": task_status})
+
+    result = cloud.get_pull_request_merge_task_status(
+        load_config(),
+        "7",
+        "task-123",
+    )
+
+    normalized = merged_pull_request("cloud", result)
+
+    assert normalized["merge_status"] == "failed"
+    assert normalized["task_status"] == task_status
+    assert normalized["landed_ref"] is None
+
+
+def test_datacenter_get_pull_request_merge_task_status_unsupported(
+    datacenter_env: None,
+) -> None:
+    with pytest.raises(
+        BitbucketError,
+        match="merge task-status reads are not supported",
+    ):
+        datacenter.get_pull_request_merge_task_status(
+            load_config(),
+            "9",
+            "task-123",
+        )
+
+
+@patch("magpie_bitbucket.cloud.get_pull_request_merge_task_status")
+def test_cli_pr_merge_task_status_cloud(
+    mock_get_merge_task_status: MagicMock,
+    cloud_env: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_get_merge_task_status.return_value = {
+        "pull_request_id": "7",
+        "task_id": "task-123",
+        "task_url": (
+            "https://api.bitbucket.org/2.0/repositories/apache/magpie/"
+            "pullrequests/7/merge/task-status/task-123"
+        ),
+        "result": {
+            "task_status": "SUCCESS",
+            "merge_result": {
+                "id": 7,
+                "state": "MERGED",
+                "merge_commit": {
+                    "hash": "abc123def456",
+                },
+            },
+        },
+    }
+
+    exit_code = main(
+        [
+            "pr",
+            "merge-task-status",
+            "7",
+            "task-123",
+        ]
+    )
+
+    assert exit_code == 0
+    mock_get_merge_task_status.assert_called_once()
+
+    args = mock_get_merge_task_status.call_args.args
+    assert args[1:] == ("7", "task-123")
+
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["operation"] == "pull-request-merge-task-status"
+    assert output["merge_status"] == "merged"
+    assert output["task_status"] == "SUCCESS"
+    assert output["landed_ref"] == "abc123def456"
+
+
+@patch("magpie_bitbucket.client.urllib.request.build_opener")
+def test_cli_pr_merge_task_status_datacenter_fails_without_request(
+    mock_build_opener: MagicMock,
+    datacenter_env: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = package_main(
+        [
+            "pr",
+            "merge-task-status",
+            "9",
+            "task-123",
+        ]
+    )
+
+    assert exit_code == 1
+    mock_build_opener.assert_not_called()
+
+    stderr = capsys.readouterr().err
+    assert "merge task-status reads are not supported" in stderr

@@ -305,8 +305,10 @@ uv run --all-packages --group dev pytest tools/github-rollup/tests
   currently provides read-only repository metadata, read-only branch restriction
   context, pull-request discovery, pull-request fetching, read-only pull-request
   commit fetching, read-only pull-request diff fetching, comments-only pull-request
-  discussion fetching, read-only review-state fetching, Cloud-only pull-request task listing/fetching, read-only merge-check
-  context fetching, read-only pull-request status fetching, and Cloud-only issue listing/fetching, issue comment fetching, issue attachment metadata fetching, and confirmed issue comment creation;
+  discussion fetching, read-only review-state fetching, Cloud-only pull-request task listing/fetching,
+  Cloud-only asynchronous merge task-status fetching, read-only merge-check context fetching,
+  read-only pull-request status fetching, and Cloud-only issue listing/fetching, issue comment fetching,
+  issue attachment metadata fetching, and confirmed issue comment creation;
   #606 remains open for full tracker/change-request coverage.
 - Bitbucket write operations follow the framework write-path discipline:
   the calling skill must obtain explicit user confirmation before invoking a

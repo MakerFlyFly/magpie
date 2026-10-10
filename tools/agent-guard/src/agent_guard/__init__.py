@@ -354,6 +354,17 @@ def gh_subcommand(argv: list[str]) -> tuple[str, str] | None:
     return None
 
 
+def _json_strings(value: object) -> list[str]:
+    """Every string in a JSON value, depth first."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _json_strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _json_strings(v)]
+    return []
+
+
 def gh_body_text(argv: list[str], *, include_title: bool, read_files: bool) -> str:
     """Concatenate the inline ``--body`` (and optionally ``--title``) plus, when
     ``read_files`` is set, the contents of any ``--body-file``."""
@@ -451,6 +462,169 @@ def _find_repo_root(start: Path) -> Path | None:
 LOCK_NAME = ".apache-magpie.lock"
 LOCAL_DIR = ".apache-magpie-local"
 OVERRIDES_DIR = ".apache-magpie-overrides"
+
+_REPO_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+
+#: ``gh api`` flags that take a separate value, so the endpoint is the first other token.
+_GH_API_VALUE_FLAGS = frozenset(
+    {
+        "-X",
+        "--method",
+        "-f",
+        "--raw-field",
+        "-F",
+        "--field",
+        "-H",
+        "--header",
+        "--input",
+        "-q",
+        "--jq",
+        "-t",
+        "--template",
+        "--hostname",
+        "--cache",
+        "-p",
+        "--preview",
+    }
+)
+
+
+#: ``gh api`` flags that take no value.
+_GH_API_BOOL_FLAGS = frozenset({"--paginate", "--slurp", "-i", "--include", "--silent", "--verbose"})
+
+
+def _gh_api_endpoint(args: list[str]) -> str | None:
+    """The endpoint positional of a ``gh api`` argument list (everything after ``api``).
+
+    None unless the line parses unambiguously: an unknown flag (whose arity
+    the guard cannot know) or a second positional means the endpoint cannot
+    be told for certain.
+    """
+    endpoint: str | None = None
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            rest = args[i + 1 :]
+            if endpoint is not None or len(rest) != 1:
+                return None
+            return rest[0]
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            if name in _GH_API_VALUE_FLAGS:
+                i += 1 if "=" in tok else 2
+                continue
+            if name in _GH_API_BOOL_FLAGS and "=" not in tok:
+                i += 1
+                continue
+            return None
+        if tok.startswith("-") and len(tok) > 1:
+            flag = tok[:2]
+            if flag in _GH_API_VALUE_FLAGS:
+                i += 1 if len(tok) > 2 else 2
+                continue
+            if tok in _GH_API_BOOL_FLAGS:
+                i += 1
+                continue
+            return None
+        if endpoint is not None:
+            return None
+        endpoint = tok
+        i += 1
+    return endpoint
+
+
+#: Value-taking flags of the ``gh pr`` / ``gh issue`` commands the mention
+#: guards widen (comment, edit, review), besides ``-R`` / ``--repo``.
+_GH_TARGET_VALUE_LONG = frozenset(
+    {
+        "--body",
+        "--body-file",
+        "--title",
+        "--base",
+        "--milestone",
+        "--add-label",
+        "--remove-label",
+        "--add-reviewer",
+        "--remove-reviewer",
+        "--add-assignee",
+        "--remove-assignee",
+        "--add-project",
+        "--remove-project",
+    }
+)
+_GH_TARGET_BOOL_LONG = frozenset(
+    {
+        "--approve",
+        "--comment",
+        "--request-changes",
+        "--edit-last",
+        "--delete-last",
+        "--yes",
+        "--create-if-none",
+        "--editor",
+        "--web",
+        "--remove-milestone",
+    }
+)
+_GH_TARGET_VALUE_SHORT = frozenset("bFtBm")
+_GH_TARGET_BOOL_SHORT = frozenset("acrew")
+
+
+def _gh_target_args(args: list[str]) -> tuple[list[str], list[str]] | None:
+    """Every ``--repo`` value and the positionals of a ``gh pr|issue`` argument list.
+
+    Parsed with each flag's arity, the way ``gh`` reads the line, so a flag's
+    value is never mistaken for a repository or a selector — ``--body
+    -Racme/x`` is body text, not ``-R``. None when the line cannot be read
+    for certain: an unknown flag, or combined short flags.
+    """
+    repos: list[str] = []
+    positionals: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            positionals.extend(args[i + 1 :])
+            break
+        if tok.startswith("--"):
+            name, eq, value = tok.partition("=")
+            if name == "--repo":
+                if not eq:
+                    if i + 1 >= len(args):
+                        return None
+                    value = args[i + 1]
+                    i += 1
+                repos.append(value)
+            elif name in _GH_TARGET_VALUE_LONG:
+                i += 0 if eq else 1
+            elif name not in _GH_TARGET_BOOL_LONG or eq:
+                return None
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            letter, rest = tok[1], tok[2:]
+            if letter == "R":
+                value = rest[1:] if rest.startswith("=") else rest
+                if not value:
+                    if i + 1 >= len(args):
+                        return None
+                    value = args[i + 1]
+                    i += 1
+                repos.append(value)
+            elif letter in _GH_TARGET_VALUE_SHORT:
+                i += 0 if rest else 1
+            elif letter not in _GH_TARGET_BOOL_SHORT or rest:
+                return None
+            i += 1
+            continue
+        positionals.append(tok)
+        i += 1
+    if len(positionals) > 1:
+        return None
+    return repos, positionals
+
+
 GIT_HOME_NAME = "apache-magpie"
 
 
@@ -819,6 +993,185 @@ class GuardContext:
 
     def mentions(self, text: str) -> list[str]:
         return find_mentions(text)
+
+    def _committed_config_text(self, filename: str) -> str | None:
+        """``.apache-magpie-overrides/<filename>`` on the target repository's default branch, on GitHub.
+
+        A value that widens what a guard allows must come from somewhere the
+        agent cannot write. Anything local fails that test — the agent can
+        edit a file, commit it, or ``cd`` into a scratch repository it made —
+        so the guard reads the copy GitHub serves from the default branch of
+        the repository the command posts to, which only a reviewed, merged
+        change can alter. A fork or scratch repository only ever governs
+        itself. Unreadable → None, and the guard falls back to the strict rule.
+        """
+        repo = self.target_repo()
+        if repo is None:
+            return None
+        return self.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/contents/{OVERRIDES_DIR}/{filename}",
+                "-H",
+                "Accept: application/vnd.github.raw",
+            ]
+        )
+
+    def _committed_row(self, filename: str, key: str) -> str | None:
+        text = self._committed_config_text(filename)
+        for line in (text or "").splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) >= 2 and cells[0] == f"`{key}`":
+                return cells[1]
+        return None
+
+    def committed_config_value(self, filename: str, key: str) -> str | None:
+        """The first backticked value of a `` | `key` | value | `` row of the config on the target repository's default branch."""
+        cell = self._committed_row(filename, key)
+        match = re.match(r"`([^`]+)`", cell or "")
+        return match.group(1).strip() if match else None
+
+    def committed_config_values(self, filename: str, key: str) -> list[str]:
+        """Every backticked value of a `` | `key` | value | `` row of the config on the target repository's default branch."""
+        return [t.strip() for t in re.findall(r"`([^`]+)`", self._committed_row(filename, key) or "")]
+
+    def gh_input_json(self) -> object | None:
+        """The JSON payload of ``gh api --input <file>``, or None."""
+        path = self.opt("--input", "--input")
+        if not path or path == "-":
+            return None
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def target_repo(self) -> str | None:
+        """``OWNER/REPO`` a ``gh`` command explicitly acts on, or None when that is not certain.
+
+        Only guards that *widen* a rule ask, so anything ambiguous answers
+        None and the strict rule stands. ``gh api`` acts on the repository in
+        a plain ``repos/OWNER/REPO/…`` endpoint; ``graphql`` and any other
+        endpoint can reach any repository, and an endpoint with ``.`` / ``..``
+        segments, percent-encoding or ``{owner}`` placeholders is refused
+        rather than resolved. Every other command must name its repository —
+        through ``--repo`` and/or a PR / issue URL as the selector
+        positional — and all of them must agree. There is no fallback to the
+        checkout: a ``cd`` or ``GH_REPO`` earlier on the line would change
+        what ``gh`` posts to without the guard seeing it.
+        """
+        sub = self.gh_subcommand()
+        if sub is not None and sub[0] == "api" and "api" in self.argv:
+            endpoint = _gh_api_endpoint(self.argv[self.argv.index("api") + 1 :]) or ""
+            path = endpoint.split("?", 1)[0].split("#", 1)[0]
+            if any(c in path for c in "%{}\\") or any(seg in (".", "..") for seg in path.split("/")):
+                return None
+            m = re.fullmatch(r"/?repos/([^/]+/[^/]+)(?:/.*)?", path)
+            found = {m.group(1).lower()} if m else set()
+        else:
+            parsed = _gh_target_args(self.argv[self.argv.index(sub[1]) + 1 :]) if sub is not None else None
+            if parsed is None:
+                return None
+            repos, positionals = parsed
+            found = {r.lower() for r in repos}
+            # Only the selector positional (`gh pr comment <URL>`) names a
+            # repository; a URL inside --body or any other value is text.
+            m = re.fullmatch(
+                r"https?://(?:www\.)?github\.com/([^/]+/[^/#?]+)/(?:pull|issues)/\d+(?:[/#?].*)?",
+                positionals[0] if positionals else "",
+                re.IGNORECASE,
+            )
+            if m:
+                found.add(m.group(1).lower())
+        if len(found) != 1:
+            return None
+        repo = found.pop()
+        return repo if _REPO_SLUG.fullmatch(repo) else None
+
+    def target_repo_owner(self) -> str | None:
+        """The owner of the repository a ``gh`` command acts on (see :meth:`target_repo`)."""
+        repo = self.target_repo()
+        return repo.split("/", 1)[0] if repo else None
+
+    def gh_api_posted_text(self) -> tuple[list[str], bool] | None:
+        """Every value a non-``GET`` ``gh api`` call would send, and whether all of it was readable.
+
+        ``None`` for anything that is not ``gh api``, and for an explicit
+        ``GET``. No endpoint or mutation list: a write to any endpoint is
+        scanned, so a newly added endpoint cannot slip past. The flags are
+        parsed the way ``gh`` accepts them — ``-X POST``, ``-XPOST``,
+        ``--method=POST``, ``-f k=v``, ``-fk=v``, ``--raw-field=k=v``, the
+        same for ``-F`` / ``--field`` (whose ``@file`` is read) and
+        ``--input`` (every string in its JSON). Text on stdin cannot be
+        inspected, so it comes back as not readable.
+        """
+        sub = self.gh_subcommand()
+        if sub is None or sub[0] != "api" or "api" not in self.argv:
+            return None
+        idx = self.argv.index("api")
+        method: str | None = None
+        raw_fields: list[str] = []
+        typed_fields: list[str] = []
+        inputs: list[str] = []
+        tokens = self.argv[idx + 1 :]
+        k = 0
+        while k < len(tokens):
+            tok = tokens[k]
+            value: str | None = None
+            for flags, sink in (
+                (("-X", "--method"), "method"),
+                (("-f", "--raw-field"), "raw"),
+                (("-F", "--field"), "typed"),
+                (("--input",), "input"),
+            ):
+                for flag in flags:
+                    if tok == flag:
+                        value = tokens[k + 1] if k + 1 < len(tokens) else ""
+                        k += 1
+                    elif flag.startswith("--") and tok.startswith(flag + "="):
+                        value = tok[len(flag) + 1 :]
+                    elif not flag.startswith("--") and tok.startswith(flag) and len(tok) > len(flag):
+                        value = tok[len(flag) :]
+                    if value is not None:
+                        break
+                if value is not None:
+                    if sink == "method":
+                        method = value.upper()
+                    elif sink == "raw":
+                        raw_fields.append(value)
+                    elif sink == "typed":
+                        typed_fields.append(value)
+                    else:
+                        inputs.append(value)
+                    break
+            k += 1
+        if method is None:
+            method = "POST" if (raw_fields or typed_fields or inputs) else "GET"
+        if method == "GET":
+            return None
+        texts: list[str] = [v.partition("=")[2] for v in raw_fields]
+        readable = True
+        for field in typed_fields:
+            value = field.partition("=")[2]
+            if value.startswith("@"):
+                if value == "@-":
+                    readable = False
+                    continue
+                try:
+                    texts.append(Path(value[1:]).read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    readable = False
+            else:
+                texts.append(value)
+        for path in inputs:
+            if path == "-":
+                readable = False
+                continue
+            try:
+                texts.extend(_json_strings(json.loads(Path(path).read_text(encoding="utf-8"))))
+            except (OSError, ValueError):
+                readable = False
+        return texts, readable
 
     def positional_after(self, sub_token: str) -> str | None:
         try:
