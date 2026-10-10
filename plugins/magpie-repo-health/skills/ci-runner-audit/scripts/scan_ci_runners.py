@@ -23,10 +23,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import subprocess
 import sys
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
@@ -81,15 +83,47 @@ ARCH_KEYS = {
 }
 
 
+class ScanError(RuntimeError):
+    """A workflow could not be fetched, parsed, or checked."""
+
+    def __init__(self, message: str, stage: str = "check") -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
+class GhError(ScanError):
+    """A gh command failed, with its original diagnostic and HTTP status."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+WORKFLOW_FIELDS = ["repo", "branch", "path", "url", "html_url"]
+ERROR_FIELDS = ["repo", "path", "stage", "error", "html_url"]
+
+
 def run(args: list[str]) -> str:
-    return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
+    completed = subprocess.run(args, capture_output=True, text=True, check=False)
+    if completed.returncode:
+        diagnostic = completed.stderr.strip() or completed.stdout.strip() or "no diagnostic"
+        status = re.search(r"\(HTTP (\d{3})\)", completed.stderr)
+        raise GhError(f"{' '.join(args[:3])}: {diagnostic}", int(status[1]) if status else None)
+    return completed.stdout
 
 
-def gh_json(path: str) -> object | None:
-    try:
-        return json.loads(run(["gh", "api", path]))
-    except Exception:
-        return None
+def gh_json(path: str) -> object:
+    return json.loads(run(["gh", "api", path]))
+
+
+def scan_error(context: dict, stage: str, exc: Exception) -> dict:
+    return {
+        "repo": str(context.get("repo") or context.get("full_name") or ""),
+        "path": str(context.get("path") or ""),
+        "stage": stage,
+        "error": f"{type(exc).__name__}: {exc}",
+        "html_url": str(context.get("html_url") or ""),
+    }
 
 
 def fetch_text(url: str) -> str:
@@ -126,16 +160,26 @@ def load_repos(cache_dir: Path, owner: str, refresh: bool) -> list[dict]:
                 ".[] | select(.archived == false) | {full_name, default_branch}",
             ]
         )
+        # Validate the entire response before publishing the repository inventory.
+        repos = [json.loads(line) for line in output.splitlines() if line.strip()]
+        if any(not isinstance(repo, dict) for repo in repos):
+            raise ScanError("Unexpected repository-list response")
         repo_file.write_text(output, encoding="utf-8")
-    return [json.loads(line) for line in repo_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return repos
+    repos = [json.loads(line) for line in repo_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if any(not isinstance(repo, dict) for repo in repos):
+        raise ScanError("Unexpected cached repository-list response")
+    return repos
 
 
 def load_repo(full_name: str) -> dict:
     repo = gh_json(f"repos/{full_name}")
     if not isinstance(repo, dict):
-        raise RuntimeError(f"Could not load repository metadata for {full_name}")
+        raise ScanError(f"Unexpected repository metadata for {full_name}")
     if repo.get("archived"):
         return {}
+    if any(not isinstance(repo.get(key), str) or not repo[key] for key in ["full_name", "default_branch"]):
+        raise ScanError(f"Repository metadata for {full_name} must include full_name and default_branch")
     return {"full_name": repo.get("full_name"), "default_branch": repo.get("default_branch")}
 
 
@@ -156,12 +200,19 @@ def list_workflows_for_repo(repo: dict) -> list[dict]:
     full_name = repo.get("full_name")
     branch = repo.get("default_branch")
     if not full_name or not branch:
-        return []
-    contents = gh_json(f"repos/{full_name}/contents/.github/workflows?ref={branch}")
+        raise ScanError("Repository metadata must include full_name and default_branch")
+    try:
+        contents = gh_json(f"repos/{full_name}/contents/.github/workflows?ref={branch}")
+    except GhError as exc:
+        if exc.status == 404:
+            return []
+        raise
     if not isinstance(contents, list):
-        return []
+        raise ScanError(f"Unexpected workflow-list response for {full_name}")
     workflows = []
     for item in contents:
+        if not isinstance(item, dict):
+            raise ScanError(f"Unexpected workflow-list entry for {full_name}")
         path = item.get("path", "")
         if item.get("type") == "file" and re.search(r"\.ya?ml$", path):
             workflows.append(
@@ -176,51 +227,64 @@ def list_workflows_for_repo(repo: dict) -> list[dict]:
     return workflows
 
 
-def load_workflows(cache_dir: Path, owner: str, refresh: bool, workers: int) -> list[dict]:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    workflow_file = cache_dir / f"{owner}-workflow-files.tsv"
-    if refresh or not workflow_file.exists():
-        repos = load_repos(cache_dir, owner, refresh)
-        workflows: list[dict] = []
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(list_workflows_for_repo, repo) for repo in repos]
-            for future in as_completed(futures):
-                workflows.extend(future.result())
-        with workflow_file.open("w", newline="", encoding="utf-8") as output:
-            writer = csv.DictWriter(
-                output,
-                delimiter="\t",
-                fieldnames=["repo", "branch", "path", "url", "html_url"],
-                lineterminator="\n",
-            )
-            writer.writeheader()
-            writer.writerows(sorted(workflows, key=lambda row: (row["repo"], row["path"])))
-    with workflow_file.open(newline="", encoding="utf-8") as input_file:
-        return list(csv.DictReader(input_file, delimiter="\t"))
-
-
-def load_workflows_for_repos(repo_names: list[str], workers: int) -> list[dict]:
-    repos = []
+def collect_workflows(repos: list[dict], workers: int) -> tuple[list[dict], list[dict]]:
+    workflows: list[dict] = []
+    errors: list[dict] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(load_repo, repo_name) for repo_name in repo_names]
+        futures = {executor.submit(list_workflows_for_repo, repo): repo for repo in repos}
         for future in as_completed(futures):
-            repo = future.result()
+            try:
+                workflows.extend(future.result())
+            except Exception as exc:
+                errors.append(scan_error(futures[future], "workflow-list", exc))
+    return sorted(workflows, key=lambda row: (row["repo"], row["path"])), errors
+
+
+def load_workflows(cache_dir: Path, owner: str, refresh: bool, workers: int) -> tuple[list[dict], list[dict]]:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Older inventories may have silently omitted failed repositories.
+    workflow_file = cache_dir / f"{owner}-workflow-files-v2.tsv"
+    if not refresh and workflow_file.exists():
+        with workflow_file.open(newline="", encoding="utf-8") as input_file:
+            reader = csv.DictReader(input_file, delimiter="\t")
+            if reader.fieldnames == WORKFLOW_FIELDS:
+                workflows = list(reader)
+                if all(all(row.get(field) for field in WORKFLOW_FIELDS) for row in workflows):
+                    return workflows, []
+    workflows, errors = collect_workflows(load_repos(cache_dir, owner, refresh), workers)
+    if not errors and all(workflow.get("url") for workflow in workflows):
+        with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+        try:
+            write_tsv(temporary_path, workflows, WORKFLOW_FIELDS)
+            os.replace(temporary_path, workflow_file)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    return workflows, errors
+
+
+def load_workflows_for_repos(repo_names: list[str], workers: int) -> tuple[list[dict], list[dict]]:
+    repos = []
+    errors = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(load_repo, repo_name): repo_name for repo_name in repo_names}
+        for future in as_completed(futures):
+            try:
+                repo = future.result()
+            except Exception as exc:
+                errors.append(scan_error({"repo": futures[future]}, "metadata", exc))
+                continue
             if repo:
                 repos.append(repo)
-    workflows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        workflow_futures: list[Future[list[dict]]] = [
-            executor.submit(list_workflows_for_repo, repo) for repo in repos
-        ]
-        for workflow_future in as_completed(workflow_futures):
-            workflows.extend(workflow_future.result())
-    return sorted(workflows, key=lambda row: (row["repo"], row["path"]))
+    workflows, listing_errors = collect_workflows(repos, workers)
+    return workflows, errors + listing_errors
 
 
 def yaml_load(text: str) -> object:
     if yaml is None:
         raise RuntimeError("PyYAML is required. Install python3-yaml or pyyaml.")
-    return yaml.safe_load(text) or {}
+    data = yaml.safe_load(text)
+    return {} if data is None else data
 
 
 def matrix_rows(matrix: object) -> list[dict]:
@@ -286,11 +350,7 @@ def candidate_runner_contexts(job: dict) -> list[tuple[str, str | None, dict]]:
     return unique
 
 
-def retired_hits(workflow: dict) -> list[dict]:
-    try:
-        data = yaml_load(fetch_text(workflow["url"]))
-    except Exception:
-        return []
+def retired_hits(workflow: dict, data: object) -> list[dict]:
     jobs = data.get("jobs") if isinstance(data, dict) else None
     if not isinstance(jobs, dict):
         return []
@@ -311,11 +371,7 @@ def retired_hits(workflow: dict) -> list[dict]:
     return hits
 
 
-def arch_hits(workflow: dict) -> list[dict]:
-    try:
-        data = yaml_load(fetch_text(workflow["url"]))
-    except Exception:
-        return []
+def arch_hits(workflow: dict, data: object) -> list[dict]:
     jobs = data.get("jobs") if isinstance(data, dict) else None
     if not isinstance(jobs, dict):
         return []
@@ -406,12 +462,47 @@ def arch_hits(workflow: dict) -> list[dict]:
     return hits
 
 
-def parallel_scan(workflows: list[dict], scanner, workers: int) -> list[dict]:
-    results = []
+def scan_workflow(workflow: dict, command: str) -> tuple[list[dict], list[dict]]:
+    try:
+        if not workflow.get("url"):
+            raise ScanError("Workflow has no download URL")
+        text = fetch_text(workflow["url"])
+    except Exception as exc:
+        raise ScanError(str(exc), "download") from exc
+    try:
+        data = yaml_load(text)
+        if not isinstance(data, dict):
+            raise ScanError("Workflow YAML must contain a mapping")
+    except Exception as exc:
+        raise ScanError(str(exc), "parse") from exc
+    return (
+        retired_hits(workflow, data) if command in ("retired", "all") else [],
+        arch_hits(workflow, data) if command in ("macos-arch", "all") else [],
+    )
+
+
+def parallel_scan(
+    workflows: list[dict], command: str, workers: int
+) -> tuple[list[dict], list[dict], int, list[dict]]:
+    retired: list[dict] = []
+    arch: list[dict] = []
+    errors: list[dict] = []
+    scanned = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(scanner, workflow) for workflow in workflows if workflow.get("url")]
+        futures = {executor.submit(scan_workflow, workflow, command): workflow for workflow in workflows}
         for future in as_completed(futures):
-            results.extend(future.result())
+            try:
+                retired_rows, arch_rows = future.result()
+            except Exception as exc:
+                errors.append(scan_error(futures[future], getattr(exc, "stage", "check"), exc))
+                continue
+            retired.extend(retired_rows)
+            arch.extend(arch_rows)
+            scanned += 1
+    return sorted_hits(retired), sorted_hits(arch), scanned, errors
+
+
+def sorted_hits(results: list[dict]) -> list[dict]:
     return sorted(
         results,
         key=lambda row: (
@@ -434,7 +525,7 @@ def write_tsv(path: Path, rows: list[dict], fields: list[str]) -> None:
         writer.writerows(rows)
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["retired", "macos-arch", "all"])
     parser.add_argument("--owner", default="apache")
@@ -451,26 +542,14 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=20)
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("--workers must be positive")
+    return args
 
-    repo_names = list(args.repo)
-    if args.repo_file:
-        repo_names.extend(load_repo_file(args.repo_file))
-    repo_names = sorted(set(repo_names))
 
-    if repo_names:
-        workflows = load_workflows_for_repos(repo_names, args.workers)
-        if args.scope_name:
-            prefix = scope_key(args.scope_name)
-        elif len(repo_names) == 1:
-            prefix = scope_key(repo_names[0])
-        else:
-            prefix = "repo-set"
-    else:
-        workflows = load_workflows(args.cache_dir, args.owner, args.refresh, args.workers)
-        prefix = scope_key(args.scope_name or args.owner)
+def write_findings(args: argparse.Namespace, prefix: str, retired: list[dict], arch: list[dict]) -> None:
 
     if args.command in ("retired", "all"):
-        retired = parallel_scan(workflows, retired_hits, args.workers)
         write_tsv(
             args.out_dir / f"{prefix}-retired-gh-runners-confirmed.tsv",
             retired,
@@ -479,7 +558,6 @@ def main() -> int:
         print(f"retired_runner_hits={len(retired)}", file=sys.stderr)
 
     if args.command in ("macos-arch", "all"):
-        arch = parallel_scan(workflows, arch_hits, args.workers)
         write_tsv(
             args.out_dir / f"{prefix}-macos-arch-mismatch-candidates.tsv",
             arch,
@@ -532,7 +610,66 @@ def main() -> int:
         print(f"macos_arch_candidates={len(arch)}", file=sys.stderr)
         print(f"setup_action_mismatches={len(setup)}", file=sys.stderr)
 
-    return 0
+
+def finish_scan(args: argparse.Namespace, prefix: str, scanned: int, errors: list[dict]) -> int:
+    errors.sort(key=lambda row: (row["repo"], row["path"], row["stage"], row["error"]))
+    try:
+        write_tsv(args.out_dir / f"{prefix}-scan-errors.tsv", errors, ERROR_FIELDS)
+    except OSError as exc:
+        errors.append(scan_error({}, "output", exc))
+    for error in errors:
+        print(f"error: {error['repo']} {error['path']} [{error['stage']}]: {error['error']}", file=sys.stderr)
+    print(f"scan_complete={str(not errors).lower()}", file=sys.stderr)
+    print(f"workflows_scanned={scanned}", file=sys.stderr)
+    print(f"scan_errors={len(errors)}", file=sys.stderr)
+    return 1 if errors else 0
+
+
+def main() -> int:
+    args = parse_args()
+    repo_names = sorted(set(args.repo))
+    prefix = scope_key(
+        args.scope_name
+        or (
+            repo_names[0]
+            if len(repo_names) == 1
+            else "repo-set"
+            if repo_names or args.repo_file
+            else args.owner
+        )
+    )
+    try:
+        if sys.version_info < (3, 11):  # noqa: UP036 - standalone script may use an older system Python
+            raise ScanError("Python 3.11 or newer is required")
+        if yaml is None:
+            raise ScanError("PyYAML is required. Install python3-yaml or pyyaml.")
+        run(["gh", "auth", "status", "--active", "--hostname", "github.com"])
+        if args.repo_file:
+            repo_names = sorted(set(repo_names + load_repo_file(args.repo_file)))
+            if not repo_names:
+                raise ScanError("The explicit repository list is empty")
+    except (ScanError, OSError) as exc:
+        finish_scan(args, prefix, 0, [scan_error({}, "prerequisite", exc)])
+        return 2
+
+    if not args.scope_name and repo_names:
+        prefix = scope_key(repo_names[0]) if len(repo_names) == 1 else "repo-set"
+    errors: list[dict] = []
+    scanned = 0
+    stage = "repository-list"
+    try:
+        if repo_names:
+            workflows, errors = load_workflows_for_repos(repo_names, args.workers)
+        else:
+            workflows, errors = load_workflows(args.cache_dir, args.owner, args.refresh, args.workers)
+        stage = "scan"
+        retired, arch, scanned, workflow_errors = parallel_scan(workflows, args.command, args.workers)
+        errors.extend(workflow_errors)
+        stage = "output"
+        write_findings(args, prefix, retired, arch)
+    except Exception as exc:
+        errors.append(scan_error({}, stage, exc))
+    return finish_scan(args, prefix, scanned, errors)
 
 
 if __name__ == "__main__":
