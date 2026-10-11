@@ -78,6 +78,14 @@ def _install_stubs(monkeypatch, module):
     monkeypatch.setattr(module, "paginated_search", fake_paginated_search)
     monkeypatch.setattr(module, "fetch_codeowners", lambda repo: "")
     monkeypatch.setattr(module, "fetch_ready_pr_files", lambda repo, nums: {})
+    if module is dashboard:
+        # dashboard.main() ends by publishing to a secret gist through `gh`.
+        # A unit test must never reach GitHub, so fail loudly if it gets there.
+        def refuse_publish(*args, **kwargs):
+            raise AssertionError("unit test reached the dashboard gist publish step")
+
+        monkeypatch.setattr(module, "gist_scope_available", refuse_publish)
+        monkeypatch.setattr(module, "publish_gist", refuse_publish)
 
 
 def _run(monkeypatch, module, out_path):
@@ -93,6 +101,8 @@ def _run(monkeypatch, module, out_path):
         "--out",
         str(out_path),
     ]
+    if module is dashboard:
+        argv.append("--no-publish")  # reference.py has no publish step and no such flag
     monkeypatch.setattr(module.sys, "argv", argv)
     module.main()
     return json.loads(out_path.with_suffix(".json").read_text())
