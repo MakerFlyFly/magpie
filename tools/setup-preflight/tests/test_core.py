@@ -36,7 +36,7 @@ from setup_preflight.core import (
     skill_findings,
     verify_findings,
 )
-from setup_preflight.lockfile import MalformedLock
+from setup_preflight.lockfile import MalformedLock, parse
 
 from .conftest import write_lock, write_stamp
 
@@ -216,6 +216,32 @@ def test_the_framework_checkout_has_nothing_to_drift(project: Path) -> None:
     write_lock(project, LOCAL)
     assert project_findings(project, None) == []
     assert project_findings(project, {"magpie-setup": "0.0.1"}) == []
+
+
+SVN_ZIP_SHA512 = "3f2a9c4e0b7d1a8e5c6f9b2d4a7e0c3f6b9d2a5e8c1f4b7d0a3e6c9f2b5d8a1e" * 2
+SVN_ZIP_URL = "https://dist.apache.org/repos/dist/release/magpie/0.2.0/apache-magpie-0.2.0-source.zip"
+SVN_ZIP_PIN = f"""\
+method: svn-zip
+url:    {SVN_ZIP_URL}
+ref:    0.2.0
+sha512: {SVN_ZIP_SHA512}
+"""
+
+
+def test_the_svn_zip_lock_setup_writes_parses(project: Path) -> None:
+    """`locks.md` and `install.md` write `sha512:` for `method: svn-zip`;
+    rejecting it failed every skill's pre-flight for an adopter installed
+    from the signed source release."""
+    assert parse(SVN_ZIP_PIN).sha512 == SVN_ZIP_SHA512
+    write_lock(project, SVN_ZIP_PIN)
+    assert codes(project_findings(project, None)) == ["snapshot-never-fetched"]
+
+
+def test_an_svn_zip_pin_matching_the_local_lock_is_silent(project: Path) -> None:
+    """The zip's hash has no local-lock counterpart: drift is method, url and ref."""
+    write_lock(project, SVN_ZIP_PIN)
+    write_local_lock(project, method="svn-zip", url=SVN_ZIP_URL, ref="0.2.0", commit="")
+    assert project_findings(project, None) == []
 
 
 def test_a_malformed_lock_raises_rather_than_reading_as_no_lock(project: Path) -> None:
