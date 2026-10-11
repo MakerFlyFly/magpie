@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 2295
+measured_tokens: 2717
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -154,6 +154,8 @@ asks for branch-specific analysis.
 ## Commands
 
 Run from the framework checkout root.
+Requires Python 3.11+, PyYAML (`python3 -m pip install pyyaml` or the system's `python3-yaml` package), and `gh` authenticated to `github.com`.
+The script checks dependencies and the active authentication before enumerating repositories.
 
 For one repository:
 
@@ -195,6 +197,8 @@ For only one check, replace `all` with `retired` or `macos-arch`.
 Use `--refresh` for org scans when cached repo/workflow inventory may be
 stale. Explicit `--repo` and `--repo-file` scans fetch repository
 metadata directly.
+Org scans use `<owner>-workflow-files-v2.tsv` and rebuild older inventories automatically.
+Only a complete workflow listing is cached, through an atomic replacement; a failed refresh preserves the previous complete inventory and reports the current run as incomplete.
 
 ---
 
@@ -208,6 +212,13 @@ The script writes TSV files under `--out-dir`:
   setup-action architecture mismatches.
 - `<scope>-macos-arch-mismatch-candidates.tsv` — broad script/action
   architecture candidates for human review. Expect false positives.
+- `<scope>-scan-errors.tsv` — failures with `repo`, `path`, `stage`, `error`, and `html_url` context; header-only when there are no errors.
+
+The script keeps successful findings when an individual repository or workflow fails.
+It prints `scan_complete`, `workflows_scanned`, and `scan_errors` to stderr; `workflows_scanned` counts files that completed every requested check.
+Exit status is `0` for a complete scan, `1` for an incomplete scan or output failure, and `2` for unavailable prerequisites or invalid arguments.
+Global prerequisite failures and failed org discovery terminate immediately; local failures are collected while the remaining work continues.
+Only a workflow-directory HTTP 404 or a successful empty listing means no workflows.
 
 Use `--scope-name` for stable output names for project or repo-set
 scans.
@@ -239,12 +250,19 @@ Before reporting a broad candidate as actionable, inspect `runs-on`,
 Report findings in this order:
 
 1. Scope scanned: owner/repo set, default branches, and number of
-   workflow files if known.
+   workflow files from `workflows_scanned` if available.
 2. Command used and whether cache was refreshed.
 3. High-confidence retired runner and setup-action mismatch findings.
 4. Broad candidates, clearly marked as false-positive-prone triage
    input.
 5. Links from the TSV `html_url` column.
+
+Check the command's exit status, `scan_complete`, and `scan_errors` before interpreting the findings.
+If the exit status is non-zero, `scan_complete=false`, or `scan_errors>0`, report the audit as incomplete, include the failure count and available error context, and identify successful findings as partial results.
+Never describe an incomplete audit as clean or claim the scope has no issues, even when its findings TSVs are empty.
+Report a clean scan only when the command succeeded, `scan_complete=true`, `scan_errors=0`, and there are no findings.
+When completion evidence is missing, state that completeness is unknown.
+If a global prerequisite or org discovery failure stopped the run before workflow checks, existing findings files in the output directory are not results of the failed invocation.
 
 Use conservative language: these findings are CI breakage or
 portability risks, not security vulnerabilities.

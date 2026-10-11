@@ -9,6 +9,9 @@ skills/ci-runner-audit/scripts/scan_ci_runners.py macos-arch --repo apache/examp
 
 Scope: one repository, default branch only.
 
+Exit status: 0.
+Summary: `scan_complete=true`, `workflows_scanned=1`, `scan_errors=0`.
+
 `apache-example-macos-setup-action-arch-mismatches.tsv` is empty except for the header.
 
 `apache-example-macos-arch-mismatch-candidates.tsv` contains one broad candidate:

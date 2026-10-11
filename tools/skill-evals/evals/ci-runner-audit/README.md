@@ -5,12 +5,12 @@
 
 Behavioral evals for the `ci-runner-audit` skill.
 
-## Suites (6 cases total)
+## Suites (11 cases total)
 
 | Suite | Step | Cases | What it covers |
 |---|---|---|---|
 | step-scope-selection | Scope selection and command choice | 4 | explicit repo, ambiguous Apache project, full-org scan, prompt injection ignored |
-| step-reporting | Reporting discipline | 2 | high-confidence vs broad candidates, CI-risk language instead of security overclaiming |
+| step-reporting | Reporting discipline | 7 | high-confidence vs broad candidates, CI-risk language, incomplete scans, prerequisite failures, complete clean scans, unknown completeness |
 
 ## Run
 
@@ -44,3 +44,4 @@ suite asserts that setup-action mismatches are high-confidence, broad
 macOS candidates are marked false-positive-prone, and runner findings
 are described as CI breakage / portability risks rather than security
 vulnerabilities.
+It also asserts that empty findings from an incomplete scan are never reported as clean, that successful findings retain their partial-scan qualification, and that stale files after a prerequisite failure are not treated as current results.
