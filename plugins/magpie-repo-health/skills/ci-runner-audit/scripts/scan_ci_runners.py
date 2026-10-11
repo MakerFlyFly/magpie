@@ -172,6 +172,7 @@ def load_repos(cache_dir: Path, owner: str, refresh: bool) -> tuple[list[dict], 
                 json.loads(line) for line in cache.read_text(encoding="utf-8").splitlines() if line.strip()
             ]
             if all(valid_repo(repo) for repo in repos):
+                print("repo_inventory=cache", file=sys.stderr)
                 return repos, []
         except (OSError, UnicodeError, ValueError):
             pass  # Rebuild an absent or damaged cache; never accept a partial write.
@@ -186,6 +187,7 @@ def load_repos(cache_dir: Path, owner: str, refresh: bool) -> tuple[list[dict], 
         ]
     )
     response = [json.loads(line) for line in output.splitlines() if line.strip()]
+    print("repo_inventory=live", file=sys.stderr)
     repos, errors = [], []
     for repo in response:
         if valid_repo(repo):
@@ -210,7 +212,7 @@ def load_repo(full_name: str) -> dict:
     repo = gh_json(f"repos/{full_name}")
     if not isinstance(repo, dict) or not valid_repo(repo):
         raise ScanError(f"Invalid repository metadata for {full_name}")
-    return {key: repo[key] for key in ("full_name", "default_branch")}
+    return {key: repo[key] for key in ("full_name", "default_branch", "archived") if key in repo}
 
 
 def load_repo_file(path: Path) -> list[str]:
@@ -321,12 +323,14 @@ def load_workflows(cache_dir: Path, owner: str, refresh: bool, workers: int) -> 
                 if reader.fieldnames == WORKFLOW_FIELDS and all(
                     set(row) == set(WORKFLOW_FIELDS) and all(row.values()) for row in rows
                 ):
+                    print("workflow_inventory=cache", file=sys.stderr)
                     return rows, []
         except (OSError, UnicodeError, csv.Error):
             pass  # Rebuild an absent or damaged workflow inventory.
     repos, errors = load_repos(cache_dir, owner, refresh)
     workflows, failures = collect_workflows(repos, workers)
     errors.extend(failures)
+    print("workflow_inventory=live", file=sys.stderr)
     if not errors:
         try:
             atomic_write(cache, lambda path: write_tsv(path, workflows, WORKFLOW_FIELDS))
@@ -346,6 +350,8 @@ def load_workflows_for_repos(repo_names: list[str], workers: int) -> tuple[list[
                 if repo["full_name"].casefold() not in seen:
                     repos.append(repo)
                     seen.add(repo["full_name"].casefold())
+                    if repo.get("archived") is True:
+                        print(f"archived_repository={repo['full_name']}", file=sys.stderr)
             except Exception as exc:
                 errors.append(scan_error({"repo": futures[future]}, "metadata", exc))
     workflows, failures = collect_workflows(repos, workers)
@@ -610,14 +616,22 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def write_findings(args: argparse.Namespace, prefix: str, retired: list[dict], arch: list[dict]) -> None:
+def write_findings(
+    args: argparse.Namespace,
+    prefix: str,
+    retired: list[dict],
+    arch: list[dict],
+    *,
+    report_counts: bool = True,
+) -> None:
     if args.command in ("retired", "all"):
         write_tsv(
             args.out_dir / f"{prefix}-retired-gh-runners-confirmed.tsv",
             retired,
             ["repo", "path", "job", "runner", "html_url"],
         )
-        print(f"retired_runner_hits={len(retired)}", file=sys.stderr)
+        if report_counts:
+            print(f"retired_runner_hits={len(retired)}", file=sys.stderr)
 
     if args.command in ("macos-arch", "all"):
         write_tsv(
@@ -669,8 +683,9 @@ def write_findings(args: argparse.Namespace, prefix: str, retired: list[dict], a
                 "html_url",
             ],
         )
-        print(f"macos_arch_candidates={len(arch)}", file=sys.stderr)
-        print(f"setup_action_mismatches={len(setup)}", file=sys.stderr)
+        if report_counts:
+            print(f"macos_arch_candidates={len(arch)}", file=sys.stderr)
+            print(f"setup_action_mismatches={len(setup)}", file=sys.stderr)
 
 
 def finish_scan(args: argparse.Namespace, prefix: str, scanned: int, errors: list[dict]) -> int:
@@ -726,7 +741,7 @@ def main() -> int:
         errors.append(scan_error({}, stage, exc))
     prefix = output_prefix(args, repos)
     try:
-        write_findings(args, prefix, retired, arch)
+        write_findings(args, prefix, retired, arch, report_counts=stage != "prerequisite")
     except Exception as exc:
         errors.append(scan_error({}, "output", exc))
     status = finish_scan(args, prefix, scanned, errors)

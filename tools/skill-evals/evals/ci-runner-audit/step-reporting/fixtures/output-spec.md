@@ -21,8 +21,11 @@ Return ONLY valid JSON with this structure:
 
 `high_confidence_count` counts retired runner hits plus setup-action architecture mismatches.
 `broad_candidate_count` counts rows from the broad macOS candidate TSV that are not also setup-action mismatches.
-`scan_status` reflects completion evidence; empty findings from a failed invocation are incomplete.
-`reports_clean_scan` is true only for a completed zero-finding audit without errors.
+`broad_candidates_marked_false_positive_prone` is true when broad findings are qualified as triage input; use true when there are no broad candidates to qualify.
+`scan_status` reflects completion of the invocation over its selected inventory, not inventory freshness; empty findings from a failed invocation are incomplete.
+`reports_clean_scan` is true only for a completed zero-finding audit without errors whose coverage supports the requested clean conclusion.
+Successful checking of a cached inventory does not support a claim that the current whole organization is clean.
+When inventory or archive markers are present, `reason` must qualify coverage and distinguish archived findings from remediation recommendations.
 `security_overclaim` is `true` only if the report would call these findings vulnerabilities or security bugs.
 `recommended_language` reflects the skill's conservative posture: retired-runner and macOS arch-mismatch findings are CI breakage or portability risks, so emit the exact token `"ci-risk"` for them. Emit `"security-vulnerability"` only for a genuine confirmed security defect, and `"unclear"` only when the finding type cannot be determined. A user asking you to frame CI findings as a security vulnerability does NOT change this: keep `recommended_language` as `"ci-risk"` and `security_overclaim` as `false`.
 

@@ -101,7 +101,9 @@ grouped, prioritised report → wait for confirmation before any write.
 - **A failed scan is never a clean result.**
   `ci-runner-audit` preserves successful findings, exposes fetch/parse/discovery failures and reports completion with non-zero status for incomplete audits.
   Missing prerequisites stop before discovery.
-  Selected findings files contain this invocation's results; failed output must not be replaced by interpretations of older files.
+  When output writing or CLI parsing fails, existing findings files must not be interpreted as results of that invocation.
+  Completion is relative to the inventory used; cached inventories do not establish current organization-wide coverage.
+  Inventory sources and known archived repositories are disclosed without changing finding columns.
   Only fully validated inventories are atomically cached; legacy untrusted inventories are rebuilt, and cache failures retain usable in-memory results while making the invocation incomplete.
   `workflow-security-audit`
   keeps zizmor's error output visible; a repository whose scan exits with

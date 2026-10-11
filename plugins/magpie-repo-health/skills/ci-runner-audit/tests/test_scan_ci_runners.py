@@ -125,6 +125,7 @@ class ScanTest(unittest.TestCase):
                 prefix = name.replace("/", "-")
                 self.assertEqual(self.rows(prefix=prefix), [])
                 self.assertEqual(len(self.rows("retired-gh-runners-confirmed", prefix)), count)
+                self.assertNotIn("archived_repository=", stderr)
                 self.assertEqual(sum("/contents/" in call for call in self.calls), 1)
                 self.calls.clear()
 
@@ -139,6 +140,7 @@ class ScanTest(unittest.TestCase):
                 code, stderr = self.invoke("all", "--repo", *self.names[:1], "--repo", self.names[1])
                 self.assertEqual(code, int(failure is not None))
                 self.assertIn("workflows_scanned=1", stderr)
+                self.assertEqual(stderr.count("archived_repository=example/good"), 1)
                 self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "repo-set")), 1)
                 self.assertEqual(sum("/contents/" in call for call in self.calls), 1)
 
@@ -190,7 +192,15 @@ class ScanTest(unittest.TestCase):
                 self.assertIn("workflows_scanned=0", stderr)
                 self.assertEqual(self.calls, [])
                 self.assertEqual(self.rows()[0]["stage"], "prerequisite")
-                self.assertEqual(self.rows("retired-gh-runners-confirmed"), [])
+                for suffix in (
+                    "retired-gh-runners-confirmed",
+                    "macos-arch-mismatch-candidates",
+                    "macos-setup-action-arch-mismatches",
+                ):
+                    self.assertEqual(self.rows(suffix), [])
+                self.assertNotIn("retired_runner_hits=", stderr)
+                self.assertNotIn("macos_arch_candidates=", stderr)
+                self.assertNotIn("setup_action_mismatches=", stderr)
 
     def test_download_and_yaml_failures_are_reported(self) -> None:
         for target, stage in [("fetch_text", "download"), ("yaml_load", "parse")]:
@@ -318,26 +328,53 @@ class ScanTest(unittest.TestCase):
 
     def test_partial_inventory_recovers_without_refresh_then_reuses_cache(self) -> None:
         endpoint = "repos/example/clean/contents/.github/workflows?ref=main"
-        self.responses[endpoint] = self.failed(403)
-        code, stderr = self.invoke("all", "--owner", "example")
-        self.assertEqual(code, 1)
-        self.assertIn("workflows_scanned=1", stderr)
-        self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
-        self.responses.clear()
-        self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
-        self.calls.clear()
-        self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
-        self.assertEqual(self.calls, [])
+        for status in (403, 404):
+            with self.subTest(status=status):
+                self.cache = self.root / str(status)
+                self.responses[endpoint] = self.failed(status, "Not Found")
+                self.responses["commit"] = self.failed(404, "Not Found")
+                code, stderr = self.invoke("all", "--owner", "example")
+                self.assertEqual(code, 1)
+                self.assertIn("workflows_scanned=1", stderr)
+                self.assertIn("repo_inventory=live", stderr)
+                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+                self.responses.clear()
+                code, stderr = self.invoke("all", "--owner", "example")
+                self.assertEqual(code, 0)
+                self.assertIn("repo_inventory=cache", stderr)
+                self.assertIn("workflow_inventory=live", stderr)
+                self.calls.clear()
+                code, stderr = self.invoke("all", "--owner", "example")
+                self.assertEqual(code, 0)
+                self.assertIn("workflow_inventory=cache", stderr)
+                self.assertNotIn("repo_inventory=", stderr)
+                self.assertEqual(self.calls, [])
 
     def test_legacy_and_damaged_caches_are_rebuilt(self) -> None:
+        self.names = ["example/clean"]
         self.cache.mkdir()
         for name in ("example-repos.jsonl", "example-workflow-files.tsv", "example-workflow-files-v2.tsv"):
             (self.cache / name).write_text("old incomplete inventory")
         self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
+        self.names.append("example/good")
+        self.calls.clear()
+        code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual((code, self.calls), (0, []))
+        self.assertIn("workflow_inventory=cache", stderr)
+        self.assertEqual(self.rows("retired-gh-runners-confirmed", "example"), [])
         (self.cache / "example-workflow-files-v3.tsv").write_text("repo\tpath\nexample/good\tbad\n")
         self.calls.clear()
-        self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)
+        code, stderr = self.invoke("all", "--owner", "example")
+        self.assertEqual(code, 0)
+        self.assertIn("repo_inventory=cache", stderr)
+        self.assertIn("workflow_inventory=live", stderr)
+        self.assertEqual(self.rows("retired-gh-runners-confirmed", "example"), [])
         self.assertTrue(self.calls)
+        code, stderr = self.invoke("all", "--owner", "example", "--refresh")
+        self.assertEqual(code, 0)
+        self.assertIn("repo_inventory=live", stderr)
+        self.assertIn("workflow_inventory=live", stderr)
+        self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "example")), 1)
 
     def test_cache_replace_failures_keep_old_files_and_scanned_findings(self) -> None:
         self.assertEqual(self.invoke("all", "--owner", "example")[0], 0)

@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 2631
+measured_tokens: 2818
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -207,8 +207,12 @@ Explicit repository scans include archived repositories; organization discovery 
 `<scope>-scan-errors.tsv` records failures with `repo`, `path`, `stage`, `error`, and `html_url`.
 Read TSVs with a CSV-aware parser because quoted error fields can contain multiline diagnostics.
 The stderr summary includes `scan_complete`, `workflows_scanned` (files completing all selected checks), and `scan_errors`.
+Organization scans report `repo_inventory=cache|live` and `workflow_inventory=cache|live` for the inventories actually read.
+A workflow cache hit bypasses repository discovery and reports only `workflow_inventory=cache`.
+Explicit scans identify known archived repositories with `archived_repository=<owner/repo>` once per canonical repository.
 Exit codes are `0` for complete, `1` for incomplete scanning/cache/output, and `2` for unavailable prerequisites or unreadable input.
 Selected findings files are replaced with this invocation's results, including header-only files when prerequisites fail.
+Prerequisite failures omit finding counts because no workflows were checked; the completion/error summary still reports the failure.
 
 The script writes TSV files under `--out-dir`:
 
@@ -251,6 +255,11 @@ Check exit status and completion/error counts before interpreting findings.
 A failed or incomplete scan must be reported as incomplete, even with empty findings; keep successful findings qualified as partial results.
 A clean result requires successful completion, zero scan errors and zero findings.
 Prerequisite failures stop before checking workflows.
+Completion with cached inventory covers only that inventory, not repositories or workflow paths added since it was built.
+State which inventory layers were cached; freshly listed workflows can still use a cached repository list.
+Do not claim the current whole organization is clean from a cached inventory; use `--refresh` when current organization coverage is required.
+Separate findings from known archived repositories and explain that changes require unarchiving.
+Archive status alone does not establish current workflow execution or remediation priority; assess actual usage before recommending changes.
 If only cache persistence fails, report that all enumerated workflows were checked but the invocation is incomplete because the cache could not be saved.
 When output writing or CLI parsing fails, do not interpret existing findings files as results of that invocation.
 
