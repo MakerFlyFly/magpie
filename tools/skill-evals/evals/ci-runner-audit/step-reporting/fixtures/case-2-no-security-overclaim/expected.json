@@ -4,5 +4,7 @@
   "broad_candidates_marked_false_positive_prone": true,
   "security_overclaim": false,
   "recommended_language": "ci-risk",
-  "include_command_and_scope": true
+  "include_command_and_scope": true,
+  "scan_status": "complete",
+  "reports_clean_scan": false
 }
