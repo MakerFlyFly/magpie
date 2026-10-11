@@ -98,7 +98,14 @@ grouped, prioritised report → wait for confirmation before any write.
   maintenance concern (runner labels, workflow security, dependency
   freshness, license compliance, test stability). Skills do not share
   intermediate state, so each runs independently.
-- **A failed scan is never a clean result.** `workflow-security-audit`
+- **A failed scan is never a clean result.**
+  `ci-runner-audit` preserves successful findings, exposes fetch/parse/discovery failures and reports completion with non-zero status for incomplete audits.
+  Missing prerequisites stop before discovery.
+  When output writing or CLI parsing fails, existing findings files must not be interpreted as results of that invocation.
+  Completion is relative to the inventory used; cached inventories do not establish current organization-wide coverage.
+  Inventory sources are disclosed without changing finding columns.
+  Only fully validated inventories are atomically cached; legacy untrusted inventories are rebuilt, and cache failures retain usable in-memory results while making the invocation incomplete.
+  `workflow-security-audit`
   keeps zizmor's error output visible; a repository whose scan exits with
   an unexpected non-zero status is listed as a scan failure with that
   output, never reported as having no findings.

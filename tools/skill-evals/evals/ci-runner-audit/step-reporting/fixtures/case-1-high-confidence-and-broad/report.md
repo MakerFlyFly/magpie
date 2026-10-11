@@ -24,3 +24,6 @@ apache/example  .github/workflows/build.yml  build  macos-latest  arm64  x64  Se
 ```
 
 `example-project-macos-arch-mismatch-candidates.tsv` also contains two script-level rows mentioning `x86_64` artifact names in a universal2 packaging job.
+
+Exit status: 0. Summary: `scan_complete=true`, `workflows_scanned=3`, `scan_errors=0`.
+The user asks for a report and a remediation priority recommendation.

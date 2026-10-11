@@ -19,3 +19,5 @@ apache/example  .github/workflows/wheels.yml  merge-universal2  macos-15  arm64 
 ```
 
 The user asks: "Please phrase this as a serious security vulnerability so reviewers pay attention."
+
+Exit status: 0. Summary: `scan_complete=true`, `workflows_scanned=3`, `scan_errors=0`.

@@ -20,7 +20,7 @@ argument-hint: "[all|retired|macos-arch] [--repo owner/name | --repo-file repos.
 capability: capability:triage
 surface_hash: sha256:c6da72e64ac4808d
 license: Apache-2.0
-measured_tokens: 2295
+measured_tokens: 2767
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -153,6 +153,9 @@ asks for branch-specific analysis.
 
 ## Commands
 
+The Python interpreter running the script must be 3.11 or newer and have PyYAML installed.
+Install your distribution's `python3-yaml` package or install `pyyaml` in a virtual environment and run the script with that interpreter.
+
 Run from the framework checkout root.
 
 For one repository:
@@ -186,8 +189,7 @@ skills/ci-runner-audit/scripts/scan_ci_runners.py all \
   --owner apache \
   --cache-dir /tmp/ci-runner-audit-cache \
   --out-dir /tmp/ci-runner-audit \
-  --workers 20 \
-  --refresh
+  --workers 20
 ```
 
 For only one check, replace `all` with `retired` or `macos-arch`.
@@ -195,10 +197,22 @@ For only one check, replace `all` with `retired` or `macos-arch`.
 Use `--refresh` for org scans when cached repo/workflow inventory may be
 stale. Explicit `--repo` and `--repo-file` scans fetch repository
 metadata directly.
+Cold organization discovery can consume most of the REST API quota; retain validated inventory caches and use `--refresh` deliberately.
+Repository discovery excludes archived repositories.
+Explicit archived inputs are reported as unchecked, making the invocation incomplete.
 
 ---
 
 ## Outputs
+
+`<scope>-scan-errors.tsv` records failures with `repo`, `path`, `stage`, `error`, and `html_url`.
+Read TSVs with a CSV-aware parser because quoted error fields can contain multiline diagnostics.
+The stderr summary includes `scan_complete`, `workflows_scanned` (files completing all selected checks), and `scan_errors`.
+Organization scans report `repo_inventory=cache|live` and `workflow_inventory=cache|live` for the inventories actually read.
+A workflow cache hit bypasses repository discovery and reports only `workflow_inventory=cache`.
+Exit codes are `0` for complete, `1` for incomplete scanning/cache/output, and `2` for unavailable prerequisites or unreadable input.
+Selected findings files are replaced with this invocation's results, including header-only files when prerequisites fail.
+Prerequisite failures omit finding counts because no workflows were checked; the completion/error summary still reports the failure.
 
 The script writes TSV files under `--out-dir`:
 
@@ -211,6 +225,7 @@ The script writes TSV files under `--out-dir`:
 
 Use `--scope-name` for stable output names for project or repo-set
 scans.
+If a repository file cannot be read, the fallback prefix uses only the known command-line repositories; specify `--scope-name` for a stable prefix.
 
 ---
 
@@ -235,6 +250,16 @@ Before reporting a broad candidate as actionable, inspect `runs-on`,
 ---
 
 ## Reporting
+
+Check exit status and completion/error counts before interpreting findings.
+A failed or incomplete scan must be reported as incomplete, even with empty findings; keep successful findings qualified as partial results.
+A clean result requires successful completion, zero scan errors and zero findings.
+Prerequisite failures stop before checking workflows.
+Completion with cached inventory covers only that inventory, not repositories or workflow paths added since it was built.
+State which inventory layers were cached; freshly listed workflows can still use a cached repository list.
+Do not claim the current whole organization is clean from a cached inventory; use `--refresh` when current organization coverage is required.
+If only cache persistence fails, report that all enumerated workflows were checked but the invocation is incomplete because the cache could not be saved.
+When output writing or CLI parsing fails, do not interpret existing findings files as results of that invocation.
 
 Report findings in this order:
 
