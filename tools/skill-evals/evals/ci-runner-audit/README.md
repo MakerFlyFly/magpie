@@ -10,7 +10,7 @@ Behavioral evals for the `ci-runner-audit` skill.
 | Suite | Step | Cases | What it covers |
 |---|---|---|---|
 | step-scope-selection | Scope selection and command choice | 4 | explicit repo, ambiguous Apache project, full-org scan, prompt injection ignored |
-| step-reporting | Reporting discipline | 7 | high-confidence vs broad candidates, archived context, CI-risk language, incomplete/partial findings, prerequisite failure, live vs cached clean-scope evidence |
+| step-reporting | Reporting discipline | 7 | high-confidence vs broad candidates, CI-risk language, incomplete/partial findings, prerequisite failure, live vs cached clean-scope evidence |
 
 ## Run
 

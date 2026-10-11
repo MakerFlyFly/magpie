@@ -129,9 +129,9 @@ class ScanTest(unittest.TestCase):
                 self.assertEqual(sum("/contents/" in call for call in self.calls), 1)
                 self.calls.clear()
 
-    def test_explicit_archived_repositories_and_aliases_are_scanned_once(self) -> None:
+    def test_repository_aliases_are_scanned_once(self) -> None:
         self.names = ["example/good", "Example/Good"]
-        self.responses["metadata"] = {"full_name": "example/good", "default_branch": "main", "archived": True}
+        self.responses["metadata"] = {"full_name": "example/good", "default_branch": "main"}
         for failure in (None, self.failed(403)):
             with self.subTest(failure=failure):
                 self.calls.clear()
@@ -140,9 +140,35 @@ class ScanTest(unittest.TestCase):
                 code, stderr = self.invoke("all", "--repo", *self.names[:1], "--repo", self.names[1])
                 self.assertEqual(code, int(failure is not None))
                 self.assertIn("workflows_scanned=1", stderr)
-                self.assertEqual(stderr.count("archived_repository=example/good"), 1)
+                self.assertNotIn("archived_repository=", stderr)
                 self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "repo-set")), 1)
                 self.assertEqual(sum("/contents/" in call for call in self.calls), 1)
+
+    def test_archived_repositories_are_unchecked_and_keep_successful_peers(self) -> None:
+        self.responses["repos/example/clean"] = {
+            "full_name": "example/clean",
+            "default_branch": "main",
+            "archived": True,
+        }
+        for names in (["example/clean"], self.names):
+            with self.subTest(names=names):
+                self.calls.clear()
+                args = [item for name in names for item in ("--repo", name)]
+                code, stderr = self.invoke("all", *args)
+                prefix = "example-clean" if len(names) == 1 else "repo-set"
+                checked = len(names) - 1
+                self.assertEqual(code, 1)
+                self.assertIn("scan_complete=false", stderr)
+                self.assertIn(f"workflows_scanned={checked}", stderr)
+                self.assertEqual(len(self.rows("retired-gh-runners-confirmed", prefix)), checked)
+                errors = self.rows(prefix=prefix)
+                self.assertEqual(
+                    [(row["repo"], row["stage"]) for row in errors], [("example/clean", "metadata")]
+                )
+                self.assertIn("excluded from the audit scope", errors[0]["error"])
+                self.assertIn("workflows were not checked", errors[0]["error"])
+                self.assertFalse(any("repos/example/clean/contents/" in call for call in self.calls))
+                self.assertNotIn("archived_repository=", stderr)
 
     def test_listing_errors_preserve_successes_and_original_diagnostic(self) -> None:
         endpoint = "repos/example/clean/contents/.github/workflows?ref=main"

@@ -6,6 +6,5 @@
   "recommended_language": "ci-risk",
   "include_command_and_scope": true,
   "scan_status": "complete",
-  "reports_clean_scan": false,
-  "reason": "Report the archived repository's finding separately as technical evidence from a read-only repository; archive status alone does not establish current impact or remediation priority."
+  "reports_clean_scan": false
 }

@@ -212,7 +212,12 @@ def load_repo(full_name: str) -> dict:
     repo = gh_json(f"repos/{full_name}")
     if not isinstance(repo, dict) or not valid_repo(repo):
         raise ScanError(f"Invalid repository metadata for {full_name}")
-    return {key: repo[key] for key in ("full_name", "default_branch", "archived") if key in repo}
+    if repo.get("archived"):
+        raise ScanError(
+            f"Archived repository {repo['full_name']} is excluded from the audit scope; "
+            "workflows were not checked"
+        )
+    return {"full_name": repo["full_name"], "default_branch": repo["default_branch"]}
 
 
 def load_repo_file(path: Path) -> list[str]:
@@ -350,8 +355,6 @@ def load_workflows_for_repos(repo_names: list[str], workers: int) -> tuple[list[
                 if repo["full_name"].casefold() not in seen:
                     repos.append(repo)
                     seen.add(repo["full_name"].casefold())
-                    if repo.get("archived") is True:
-                        print(f"archived_repository={repo['full_name']}", file=sys.stderr)
             except Exception as exc:
                 errors.append(scan_error({"repo": futures[future]}, "metadata", exc))
     workflows, failures = collect_workflows(repos, workers)
