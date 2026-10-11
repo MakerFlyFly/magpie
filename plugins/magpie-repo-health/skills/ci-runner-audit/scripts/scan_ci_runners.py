@@ -106,12 +106,10 @@ def run(args: list[str]) -> str:
         diagnostic = stderr.strip() or (completed.stdout or b"").decode("utf-8", errors="replace").strip()
         status = re.search(r"\(HTTP (\d{3})\)", stderr)
         raise GhError(
-            f"{' '.join(args[:3])}: {diagnostic or 'no captured diagnostic'}",
+            f"gh api {args[3] if args[2] == '--paginate' else args[2]}: {diagnostic or 'no captured diagnostic'}",
             int(status[1]) if status else None,
             diagnostic,
         )
-    if completed.stdout is None:
-        raise ScanError("gh stdout was not captured")
     return completed.stdout.decode("utf-8")
 
 
@@ -193,7 +191,13 @@ def load_repos(cache_dir: Path, owner: str, refresh: bool) -> tuple[list[dict], 
         if valid_repo(repo):
             repos.append(repo)
         else:
-            errors.append(scan_error({}, "metadata", ScanError(f"Invalid repository metadata: {repo!r}")))
+            errors.append(
+                scan_error(
+                    repo if isinstance(repo, dict) else {},
+                    "metadata",
+                    ScanError(f"Invalid repository metadata: {repo!r}"),
+                )
+            )
     if not errors:
         try:
             atomic_write(cache, lambda path: path.write_text(output, encoding="utf-8"))
@@ -204,8 +208,6 @@ def load_repos(cache_dir: Path, owner: str, refresh: bool) -> tuple[list[dict], 
 
 def load_repo(full_name: str) -> dict:
     repo = gh_json(f"repos/{full_name}")
-    if isinstance(repo, dict) and repo.get("archived"):
-        return {}
     if not isinstance(repo, dict) or not valid_repo(repo):
         raise ScanError(f"Invalid repository metadata for {full_name}")
     return {key: repo[key] for key in ("full_name", "default_branch")}
@@ -231,6 +233,8 @@ def workflow_contents(full_name: str, branch: str) -> object:
     except GhError as original:
         if original.status != 404:
             raise
+        if re.fullmatch(r"gh: This repository is empty\. \(HTTP 404\)", original.diagnostic):
+            return []
         # A 404 can also mean an invalid ref; verify it before accepting absence.
         try:
             sha = run(
@@ -242,9 +246,7 @@ def workflow_contents(full_name: str, branch: str) -> object:
                     "Accept: application/vnd.github.sha",
                 ]
             ).strip()
-            if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
-                raise ScanError("Ref verification must return a 40-character hexadecimal SHA")
-        except Exception as exc:
+        except (GhError, OSError, UnicodeError) as exc:
             if (
                 isinstance(exc, GhError)
                 and exc.status == 409
@@ -252,6 +254,10 @@ def workflow_contents(full_name: str, branch: str) -> object:
             ):
                 return []
             raise ScanError(f"{original}; cannot verify ref {branch}: {exc}") from exc
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            raise ScanError(
+                f"{original}; cannot verify ref {branch}: expected a 40-character hexadecimal SHA"
+            ) from original
         try:
             return gh_json(directory + sha)
         except GhError as exc:
@@ -331,13 +337,15 @@ def load_workflows(cache_dir: Path, owner: str, refresh: bool, workers: int) -> 
 
 def load_workflows_for_repos(repo_names: list[str], workers: int) -> tuple[list[dict], list[dict]]:
     repos, errors = [], []
+    seen = set()
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(load_repo, name): name for name in repo_names}
         for future in as_completed(futures):
             try:
                 repo = future.result()
-                if repo:
+                if repo["full_name"].casefold() not in seen:
                     repos.append(repo)
+                    seen.add(repo["full_name"].casefold())
             except Exception as exc:
                 errors.append(scan_error({"repo": futures[future]}, "metadata", exc))
     workflows, failures = collect_workflows(repos, workers)
@@ -597,11 +605,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=20)
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("--workers must be a positive integer")
     return args
 
 
 def write_findings(args: argparse.Namespace, prefix: str, retired: list[dict], arch: list[dict]) -> None:
-
     if args.command in ("retired", "all"):
         write_tsv(
             args.out_dir / f"{prefix}-retired-gh-runners-confirmed.tsv",
@@ -689,6 +698,10 @@ def output_prefix(args: argparse.Namespace, repos: list[str]) -> str:
 def main() -> int:
     args = parse_args()
     repos = sorted(set(args.repo))
+    retired: list[dict] = []
+    arch: list[dict] = []
+    errors: list[dict] = []
+    scanned, stage = 0, "prerequisite"
     try:
         if args.repo_file:
             repos = sorted(set(repos + load_repo_file(args.repo_file)))
@@ -700,13 +713,7 @@ def main() -> int:
             raise ScanError("GitHub CLI (gh) is required")
         if args.repo_file and not repos:
             raise ScanError("The explicit repository list is empty")
-    except (ScanError, OSError, UnicodeError) as exc:
-        finish_scan(args, output_prefix(args, repos), 0, [scan_error({}, "prerequisite", exc)])
-        return 2
-    prefix = output_prefix(args, repos)
-    errors: list[dict] = []
-    scanned, stage = 0, "repository-list"
-    try:
+        stage = "repository-list"
         workflows, errors = (
             load_workflows_for_repos(repos, args.workers)
             if repos
@@ -715,11 +722,15 @@ def main() -> int:
         stage = "scan"
         retired, arch, scanned, failures = parallel_scan(workflows, args.command, args.workers)
         errors.extend(failures)
-        stage = "output"
-        write_findings(args, prefix, retired, arch)
     except Exception as exc:
         errors.append(scan_error({}, stage, exc))
-    return finish_scan(args, prefix, scanned, errors)
+    prefix = output_prefix(args, repos)
+    try:
+        write_findings(args, prefix, retired, arch)
+    except Exception as exc:
+        errors.append(scan_error({}, "output", exc))
+    status = finish_scan(args, prefix, scanned, errors)
+    return 2 if stage == "prerequisite" else status
 
 
 if __name__ == "__main__":

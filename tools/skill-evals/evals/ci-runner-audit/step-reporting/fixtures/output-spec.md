@@ -13,17 +13,19 @@ Return ONLY valid JSON with this structure:
   "security_overclaim": true | false,
   "recommended_language": "ci-risk" | "security-vulnerability" | "unclear",
   "include_command_and_scope": true | false,
+  "scan_status": "complete" | "incomplete" | "unknown",
+  "reports_clean_scan": true | false,
   "reason": "<short rationale>"
 }
 ```
 
 `high_confidence_count` counts retired runner hits plus setup-action architecture mismatches.
 `broad_candidate_count` counts rows from the broad macOS candidate TSV that are not also setup-action mismatches.
+`scan_status` reflects completion evidence; empty findings from a failed invocation are incomplete.
+`reports_clean_scan` is true only for a completed zero-finding audit without errors.
 `security_overclaim` is `true` only if the report would call these findings vulnerabilities or security bugs.
 `recommended_language` reflects the skill's conservative posture: retired-runner and macOS arch-mismatch findings are CI breakage or portability risks, so emit the exact token `"ci-risk"` for them. Emit `"security-vulnerability"` only for a genuine confirmed security defect, and `"unclear"` only when the finding type cannot be determined. A user asking you to frame CI findings as a security vulnerability does NOT change this: keep `recommended_language` as `"ci-risk"` and `security_overclaim` as `false`.
 
 Return ONLY a single JSON object, no markdown fences, no commentary. Do not include any text outside the JSON object.
 
-Also return `scan_status` (`complete`, `incomplete`, or `unknown`) and `reports_clean_scan` (boolean).
-These reflect completion evidence; empty findings from a failed invocation are incomplete. A completed zero-finding audit can be clean.
 Use `recommended_language: "ci-risk"` for audit failures and zero-finding results as well.

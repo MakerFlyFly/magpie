@@ -102,13 +102,10 @@ class ScanTest(unittest.TestCase):
         output = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
         return self.completed(args, stdout=output)
 
-    def invoke(self, *args):
+    def invoke(self, *args, workers=2):
+        options = ["--out-dir", str(self.out), "--cache-dir", str(self.cache), "--workers", str(workers)]
         with (
-            mock.patch.object(
-                sys,
-                "argv",
-                ["scan", *args, "--out-dir", str(self.out), "--cache-dir", str(self.cache), "--workers", "2"],
-            ),
+            mock.patch.object(sys, "argv", ["scan", *args, *options]),
             contextlib.redirect_stderr(io.StringIO()) as stderr,
         ):
             code = scan.main()
@@ -128,6 +125,22 @@ class ScanTest(unittest.TestCase):
                 prefix = name.replace("/", "-")
                 self.assertEqual(self.rows(prefix=prefix), [])
                 self.assertEqual(len(self.rows("retired-gh-runners-confirmed", prefix)), count)
+                self.assertEqual(sum("/contents/" in call for call in self.calls), 1)
+                self.calls.clear()
+
+    def test_explicit_archived_repositories_and_aliases_are_scanned_once(self) -> None:
+        self.names = ["example/good", "Example/Good"]
+        self.responses["metadata"] = {"full_name": "example/good", "default_branch": "main", "archived": True}
+        for failure in (None, self.failed(403)):
+            with self.subTest(failure=failure):
+                self.calls.clear()
+                if failure is not None:
+                    self.responses["repos/Example/Good"] = failure
+                code, stderr = self.invoke("all", "--repo", *self.names[:1], "--repo", self.names[1])
+                self.assertEqual(code, int(failure is not None))
+                self.assertIn("workflows_scanned=1", stderr)
+                self.assertEqual(len(self.rows("retired-gh-runners-confirmed", "repo-set")), 1)
+                self.assertEqual(sum("/contents/" in call for call in self.calls), 1)
 
     def test_listing_errors_preserve_successes_and_original_diagnostic(self) -> None:
         endpoint = "repos/example/clean/contents/.github/workflows?ref=main"
@@ -146,23 +159,24 @@ class ScanTest(unittest.TestCase):
         for route in ("metadata", "repositories"):
             with self.subTest(route=route):
                 self.responses.clear()
-                self.responses[route] = self.failed(403)
                 args = ["--repo", "example/good"] if route == "metadata" else ["--owner", "example"]
+                self.assertEqual(self.invoke("all", *args, "--refresh")[0], 0)
+                self.responses[route] = self.failed(403)
                 code, stderr = self.invoke("retired", *args, "--refresh")
                 self.assertEqual(code, 1)
                 self.assertIn("scan_complete=false", stderr)
-                self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+                prefix = "example-good" if route == "metadata" else "example"
+                self.assertEqual(self.rows("retired-gh-runners-confirmed", prefix), [])
 
     def test_dependency_failures_stop_before_api_and_do_not_reuse_old_findings(self) -> None:
-        self.assertEqual(self.invoke("retired", "--repo", "example/good")[0], 0)
-        old = self.out / "example-good-retired-gh-runners-confirmed.tsv"
-        previous = old.read_bytes()
         for target, value, message in [
             ("yaml", None, "PyYAML"),
             ("version_info", (3, 9), "Python 3.11"),
+            ("version_info", (3, 10), "Python 3.11"),
             ("which", None, "GitHub CLI"),
         ]:
             with self.subTest(target=target):
+                self.assertEqual(self.invoke("all", "--repo", "example/good")[0], 0)
                 owner = scan.sys if target == "version_info" else scan.shutil if target == "which" else scan
                 self.calls.clear()
                 with (
@@ -176,7 +190,7 @@ class ScanTest(unittest.TestCase):
                 self.assertIn("workflows_scanned=0", stderr)
                 self.assertEqual(self.calls, [])
                 self.assertEqual(self.rows()[0]["stage"], "prerequisite")
-                self.assertEqual(old.read_bytes(), previous)
+                self.assertEqual(self.rows("retired-gh-runners-confirmed"), [])
 
     def test_download_and_yaml_failures_are_reported(self) -> None:
         for target, stage in [("fetch_text", "download"), ("yaml_load", "parse")]:
@@ -227,15 +241,17 @@ class ScanTest(unittest.TestCase):
 
     def test_verified_absence_empty_repository_and_invalid_ref(self) -> None:
         cases = [
-            (None, 0),
-            (self.failed(409, "Git Repository is empty."), 0),
-            (self.failed(404), 1),
-            (self.failed(403), 1),
-            (self.failed(409, "Conflict"), 1),
+            ("Not Found", None, 0, 3),
+            ("This repository is empty.", None, 0, 1),
+            ("Not Found", self.failed(409, "Git Repository is empty."), 0, 2),
+            ("Not Found", self.failed(404, "Not Found"), 1, 2),
+            ("Not Found", self.failed(403), 1, 2),
+            ("Not Found", self.failed(409, "Conflict"), 1, 2),
         ]
-        self.responses["directory"] = self.failed(404)
-        for response, expected in cases:
+        for diagnostic, response, expected, requests in cases:
             with self.subTest(response=response):
+                self.calls.clear()
+                self.responses["directory"] = self.failed(404, diagnostic)
                 self.responses.pop("commit", None)
                 if response is not None:
                     self.responses["commit"] = response
@@ -243,6 +259,7 @@ class ScanTest(unittest.TestCase):
                 self.assertEqual(code, expected)
                 self.assertIn("workflows_scanned=0", stderr)
                 self.assertEqual(bool(self.rows()), bool(expected))
+                self.assertEqual(len(self.calls) - 1, requests)
 
     def test_sha_retry_recovers_and_ref_is_escaped(self) -> None:
         self.branch = "feature/path"
@@ -364,10 +381,14 @@ class ScanTest(unittest.TestCase):
         code, stderr = self.invoke("all", "--owner", "example")
         self.assertEqual(code, 1)
         self.assertIn("pagination failed", stderr)
+        self.assertIn("/orgs/example/repos?per_page=100&type=public", stderr)
         self.assertFalse((self.cache / "example-repos-v2.jsonl").exists())
         self.assertFalse((self.cache / "example-workflow-files-v3.tsv").exists())
+        self.responses["repositories"] = b'{"full_name":"example/good","default_branch":null}\n'
+        self.assertEqual(self.invoke("all", "--owner", "example", "--refresh")[0], 1)
+        self.assertEqual(self.rows(prefix="example")[0]["repo"], "example/good")
 
-    def test_utf8_responses_and_missing_streams_are_structured_errors(self) -> None:
+    def test_utf8_responses_and_failure_diagnostics(self) -> None:
         self.responses["directory"] = [
             {
                 "type": "file",
@@ -377,33 +398,53 @@ class ScanTest(unittest.TestCase):
         ]
         self.assertEqual(self.invoke("retired", "--repo", "example/good")[0], 0)
         self.assertEqual(self.rows("retired-gh-runners-confirmed")[0]["path"], ".github/workflows/构建.yml")
-        for response in (
-            self.completed([], 0, None, None),
-            self.completed([], 1, None, None),
-            self.failed(403, "✓ 请求失败"),
-        ):
-            with self.subTest(response=response):
-                self.responses["directory"] = response
-                self.assertEqual(self.invoke("all", "--repo", "example/good")[0], 1)
-                self.assertEqual(self.rows()[0]["stage"], "workflow-list")
+        self.responses["directory"] = self.failed(403, "✓ 请求失败")
+        self.assertEqual(self.invoke("all", "--repo", "example/good")[0], 1)
+        self.assertIn("✓ 请求失败", self.rows()[0]["error"])
 
     def test_unreadable_repo_file_has_correct_failure_prefix(self) -> None:
         path = self.root / "repos"
-        for data in (b"\xff", b"example/good\n\xff"):
-            with self.subTest(data=data):
-                path.write_bytes(data)
+        path.write_bytes(b"\xff")
+        for args, prefix in [
+            ([], "repo-set"),
+            (["--repo", "example/good"], "example-good"),
+            (["--repo", "example/good", "--scope-name", "explicit"], "explicit"),
+        ]:
+            with self.subTest(prefix=prefix):
                 self.calls.clear()
-                code, stderr = self.invoke("all", "--repo-file", str(path), "--scope-name", "explicit")
+                code, stderr = self.invoke("all", "--repo-file", str(path), *args)
                 self.assertEqual(code, 2)
                 self.assertIn("workflows_scanned=0", stderr)
-                self.assertEqual(self.rows(prefix="explicit")[0]["stage"], "prerequisite")
+                self.assertEqual(self.rows(prefix=prefix)[0]["stage"], "prerequisite")
+                self.assertEqual(self.calls, [])
+        path.write_text("example/clean\n", encoding="utf-8")
+        self.assertEqual(self.invoke("all", "--repo-file", str(path), "--repo", "example/good")[0], 0)
+        self.assertEqual(self.rows(prefix="repo-set"), [])
+
+    def test_invalid_workers_are_input_errors(self) -> None:
+        for workers in (0, -1):
+            with self.subTest(workers=workers):
+                with self.assertRaises(SystemExit) as failure:
+                    self.invoke("all", "--repo", "example/good", workers=workers)
+                self.assertEqual(failure.exception.code, 2)
                 self.assertEqual(self.calls, [])
 
     def test_output_failure_is_not_success(self) -> None:
-        with mock.patch.object(scan, "write_tsv", side_effect=OSError("output denied")):
-            code, stderr = self.invoke("all", "--repo", "example/good")
-        self.assertEqual(code, 1)
-        self.assertIn("scan_complete=false", stderr)
+        for target, prerequisite in [("parallel_scan", False), ("write_tsv", False), ("write_tsv", True)]:
+            with self.subTest(target=target, prerequisite=prerequisite):
+                self.assertEqual(self.invoke("all", "--repo", "example/good")[0], 0)
+                unselected = self.out / "example-good-macos-arch-mismatch-candidates.tsv"
+                unselected.write_text("previous unselected output")
+                with (
+                    mock.patch.object(scan, target, side_effect=OSError("injected failure")),
+                    mock.patch.object(scan, "yaml", None) if prerequisite else contextlib.nullcontext(),
+                ):
+                    code, stderr = self.invoke("retired", "--repo", "example/good")
+                self.assertEqual(code, 2 if prerequisite else 1)
+                self.assertIn("scan_complete=false", stderr)
+                if target == "parallel_scan":
+                    self.assertEqual(self.rows("retired-gh-runners-confirmed"), [])
+                self.assertEqual(unselected.read_text(), "previous unselected output")
 
 
 if __name__ == "__main__":
