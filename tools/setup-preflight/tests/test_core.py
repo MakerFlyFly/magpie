@@ -228,20 +228,56 @@ sha512: {SVN_ZIP_SHA512}
 """
 
 
-def test_the_svn_zip_lock_setup_writes_parses(project: Path) -> None:
+@pytest.mark.parametrize("method_first", [True, False], ids=["method-first", "method-last"])
+def test_the_svn_zip_lock_setup_writes_parses(project: Path, method_first: bool) -> None:
     """`locks.md` and `install.md` write `sha512:` for `method: svn-zip`;
     rejecting it failed every skill's pre-flight for an adopter installed
     from the signed source release."""
-    assert parse(SVN_ZIP_PIN).sha512 == SVN_ZIP_SHA512
-    write_lock(project, SVN_ZIP_PIN)
+    pin = SVN_ZIP_PIN
+    if not method_first:
+        method, _, rest = pin.partition("\n")
+        pin = rest + method + "\n"
+    assert parse(pin).sha512 == SVN_ZIP_SHA512
+    write_lock(project, pin)
     assert codes(project_findings(project, None)) == ["snapshot-never-fetched"]
 
 
-def test_an_svn_zip_pin_matching_the_local_lock_is_silent(project: Path) -> None:
-    """The zip's hash has no local-lock counterpart: drift is method, url and ref."""
+@pytest.mark.parametrize("fetched_commit", ["", "0.2.0"], ids=["legacy-empty", "upgrade-version"])
+def test_the_documented_svn_zip_local_lock_is_accepted(project: Path, fetched_commit: str) -> None:
+    """Existing local locks may record an empty commit or the fetched zip's version;
+    both remain readable when their recorded pin fields match."""
     write_lock(project, SVN_ZIP_PIN)
-    write_local_lock(project, method="svn-zip", url=SVN_ZIP_URL, ref="0.2.0", commit="")
+    write_local_lock(project, method="svn-zip", url=SVN_ZIP_URL, ref="0.2.0", commit=fetched_commit)
     assert project_findings(project, None) == []
+
+
+@pytest.mark.parametrize("method", ["git-tag", "git-branch", "marketplace", "local", None, "other"])
+@pytest.mark.parametrize("method_first", [True, False], ids=["method-first", "method-last"])
+def test_sha512_is_rejected_outside_svn_zip(method: str | None, method_first: bool) -> None:
+    """A mistyped git commit anchor must not become an ignored zip digest."""
+    method_line = f"method: {method}\n" if method is not None else ""
+    hash_line = f"sha512: {SVN_ZIP_SHA512}\n"
+    pin = method_line + hash_line if method_first else hash_line + method_line
+    with pytest.raises(MalformedLock, match=r"sha512.*svn-zip"):
+        parse(pin)
+
+
+@pytest.mark.parametrize("value", ["", "   ", " # the digest is missing"])
+def test_an_empty_sha512_names_the_missing_value(value: str) -> None:
+    with pytest.raises(MalformedLock, match=r"missing value.*sha512"):
+        parse(f"method: svn-zip\nsha512:{value}\n")
+
+
+def test_an_unknown_scalar_key_is_still_rejected(project: Path) -> None:
+    write_lock(project, SVN_ZIP_PIN + "sha521: abc\n")
+    with pytest.raises(MalformedLock, match="unknown key: 'sha521'"):
+        project_findings(project, None)
+
+
+@pytest.mark.parametrize("block", ["plugins", "reconciled"])
+def test_a_structured_block_cannot_be_assigned_a_scalar(block: str) -> None:
+    with pytest.raises(MalformedLock, match=f"unknown key: '{block}'"):
+        parse(f"method: marketplace\n{block}: not-a-block\n")
 
 
 def test_a_malformed_lock_raises_rather_than_reading_as_no_lock(project: Path) -> None:

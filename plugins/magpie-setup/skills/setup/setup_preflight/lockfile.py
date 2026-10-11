@@ -85,6 +85,7 @@ def _strip_comment(line: str) -> str:
 def parse(text: str) -> Lock:
     """Parse the lock's text. Raises `MalformedLock` on anything unexpected."""
     lock = Lock()
+    scalar_keys = {f.name for f in fields(Lock)} - {"plugins", "reconciled"}
     section: str | None = None
     for raw in text.splitlines():
         line = _strip_comment(raw)
@@ -102,6 +103,8 @@ def parse(text: str) -> Lock:
                 elif key == "reconciled":
                     section = "reconciled"
                     lock.reconciled = Reconciled()
+                elif key == "sha512":
+                    raise MalformedLock("missing value for key: 'sha512'")
                 else:
                     raise MalformedLock(f"unknown block: {key!r}")
                 continue
@@ -109,7 +112,7 @@ def parse(text: str) -> Lock:
                 raise MalformedLock(f"not a key: value line: {raw!r}")
             key, _, value = body.partition(":")
             key, value = key.strip(), value.strip()
-            if key in {"method", "url", "min_version", "ref", "commit", "sha512", "source"}:
+            if key in scalar_keys:
                 setattr(lock, key, value)
             else:
                 raise MalformedLock(f"unknown key: {key!r}")
@@ -142,6 +145,8 @@ def parse(text: str) -> Lock:
             continue
 
         raise MalformedLock(f"indented line outside any block: {raw!r}")
+    if lock.sha512 is not None and lock.method != "svn-zip":
+        raise MalformedLock("'sha512' is only valid for method: 'svn-zip'")
     return lock
 
 
