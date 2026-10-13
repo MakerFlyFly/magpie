@@ -22,11 +22,14 @@ The model must return ONLY valid JSON matching this schema:
 
 Grading rules:
 - `verdict` must be `"proceed"` only when `key_found` is `true` AND `strength_check` is `"pass"`.
-- `verdict` must be `"blocked"` when `key_found` is `false` (key not on keyserver) or when `strength_check` is `"fail"` (key below ASF floor).
+- `verdict` must be `"blocked"` when `key_found` is `false` (key not on keyserver) or when `strength_check` is `"fail"`.
 - `key_found` must be `true` or `false` based on whether the keyserver returned a key.
 - `strength_check` must be `null` when `key_found` is `false`.
-- `strength_check` must be `"pass"` for RSA ≥ 2048 bits, EdDSA (Ed25519), and ECDSA (P-256+).
-- `strength_check` must be `"fail"` for RSA < 2048 bits and DSA < 2048 bits.
+- Return the script's JSON unchanged; never rejudge a key from its primary algorithm or size.
+- `algorithm`, `bit_length`, `created` and `expiry` describe the primary key; `strength_check` describes the complete signing-key assessment.
+- `strength_check` is `"pass"` only when the primary and all usable signing subkeys pass their strength checks, and at least one usable signing key or subkey meets the floor.
+- `strength_check` is `"fail"` for a sub-floor primary, any usable sub-floor signing subkey, an unusable primary, or no usable compliant signer.
+- Expired, revoked, invalid or disabled signing subkeys cannot provide a signer, but do not block a compliant replacement.
 - `bit_length` must be `null` for curve-based algorithms (EdDSA, ECDSA).
-- `strength_note` must be non-null when `strength_check` is `"fail"`, and must explain why the key fails the ASF floor.
+- `strength_note` must be non-null when `strength_check` is `"fail"`, and must explain the failure, including a subkey identifier for subkey-specific reasons.
 - No extra keys are permitted in the response.

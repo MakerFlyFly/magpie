@@ -1,0 +1,13 @@
+{
+  "verdict": "blocked",
+  "key_found": true,
+  "fingerprint": "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6ABCD",
+  "uid": "Example Release Manager <rm@example.invalid>",
+  "algorithm": "RSA",
+  "bit_length": 4096,
+  "created": "2022-03-15",
+  "expiry": null,
+  "strength_check": "fail",
+  "has_weak_key_note": true,
+  "has_no_signer_note": true
+}

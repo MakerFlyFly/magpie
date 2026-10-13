@@ -153,6 +153,14 @@ code lands.
 - **Drafts, never sends.** `[VOTE]` (step 7) and `[ANNOUNCE]` (step 11)
   email bodies are drafted to the maintainer's outbox; no skill calls a
   send.
+- **Usable signing keys meet the floor.** `release-keys-sync` validates
+  the primary and every usable signing subkey, and requires at least one
+  usable compliant signer. An active weak signing subkey blocks even
+  alongside a strong signer; this is the skill's conservative admission
+  policy, not a separate ASF mandate for mixed key groups. Expired,
+  revoked, invalid or disabled subkeys do not prevent rotation to a
+  compliant signer. The JSON metadata still describes the primary;
+  `strength_check` and `strength_note` describe the complete assessment.
 - **Conservative tally.** `release-vote-tally` classifies +1/0/-1 binding
   vs non-binding against the PMC roster and refuses to count ambiguous
   votes, flagging `AMBIGUOUS, needs RM call` rather than guessing.
