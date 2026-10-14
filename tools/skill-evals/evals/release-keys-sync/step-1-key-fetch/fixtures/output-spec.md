@@ -30,6 +30,9 @@ Grading rules:
 - `strength_check` is `"pass"` only when the primary and all usable signing subkeys pass their strength checks, and at least one usable signing key or subkey meets the floor.
 - `strength_check` is `"fail"` for a sub-floor primary, any usable sub-floor signing subkey, an unusable primary, or no usable compliant signer.
 - Expired, revoked, invalid or disabled signing subkeys cannot provide a signer, but do not block a compliant replacement.
+- GPG validity `e` means already expired, including on the expiry date; a matching or earlier `--today` cannot restore usability.
+- `--today` changes only calendar-date checks and advisories, not GPG's computed validity or clock; historical replay requires a listing captured at the intended instant.
+- A same-day key not marked expired can have an expiry advisory; a key marked `e` must not also receive a non-blocking expiry advisory.
 - `bit_length` must be `null` for curve-based algorithms (EdDSA, ECDSA).
 - `strength_note` must be non-null when `strength_check` is `"fail"`, and must explain the failure, including a subkey identifier for subkey-specific reasons.
 - No extra keys are permitted in the response.

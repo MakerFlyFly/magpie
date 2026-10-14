@@ -31,6 +31,10 @@ advisory, and the advisory for an expiry within 90 days. A key that has
 already expired is a blocker, like a sub-floor key. Every usable signing
 subkey must meet the same floor, and at least one usable signing key or
 subkey must meet it. Retired signing subkeys do not prevent key rotation.
+GPG's expired validity is authoritative even on the expiry date. ``--today``
+overrides only calendar-date checks and advisories, not GPG's clock or
+computed validity. Historical replay needs a colon listing captured at
+the intended instant; an earlier date cannot reactivate an expired key.
 
 KEYS-directory mode (Step 2)::
 
@@ -61,6 +65,7 @@ EDDSA_CURVES = {"ed25519", "ed448"}
 ECDSA_CURVES = {"nistp256", "nistp384", "nistp521", "brainpoolp256r1", "brainpoolp384r1", "brainpoolp512r1"}
 FLOOR_BITS = 2048
 UNUSABLE_VALIDITY = {
+    "e": "key is expired (gpg marked it expired); extend its expiry or generate a new key",
     "r": "key is revoked; generate a new key",
     "i": "key is invalid (gpg could not validate it); fix or replace the key",
     "d": "key is disabled",
@@ -143,7 +148,7 @@ def _check(key: dict[str, Any], today: dt.date) -> tuple[bool, list[str]]:
             notes.append(f"ECDSA curve {key['curve'] or 'unknown'!r} is not P-256 or stronger")
     else:
         notes.append(f"public-key algorithm id {key['algo_id']} is not accepted for release signing")
-    # gpg's validity field: a revoked, invalid or disabled key never signs a release,
+    # gpg's validity field: an expired, revoked, invalid or disabled key never signs a release,
     # whatever its strength or expiry date says.
     unusable = UNUSABLE_VALIDITY.get(key.get("validity", ""))
     if not unusable and "D" in key["capabilities"]:
@@ -156,7 +161,7 @@ def _check(key: dict[str, Any], today: dt.date) -> tuple[bool, list[str]]:
         if days < 0:
             passed = False
             notes.append(f"key expired on {key['expiry']}; extend its expiry or generate a new key")
-        elif days <= EXPIRY_ADVISORY_DAYS:
+        elif days <= EXPIRY_ADVISORY_DAYS and key["validity"] != "e":
             notes.append(
                 f"key expires on {key['expiry']}, within {EXPIRY_ADVISORY_DAYS} days; consider extending it"
             )
@@ -260,7 +265,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--key-file", help="fetched public key (armoured or binary); may be empty")
     parser.add_argument("--fingerprint")
-    parser.add_argument("--today", help="YYYY-MM-DD; defaults to the current UTC date")
+    parser.add_argument(
+        "--today",
+        help="YYYY-MM-DD for date checks; defaults to the current UTC date; GPG validity is unchanged",
+    )
     parser.add_argument("--keys-url", help="keys_file_url, for the KEYS-directory mode")
     parser.add_argument("--colons-file", help=argparse.SUPPRESS)  # tests: pre-captured gpg listing
     args = parser.parse_args(argv)

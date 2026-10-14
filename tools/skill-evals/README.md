@@ -72,7 +72,7 @@ Suites are currently implemented for:
 - **release-announce-draft** — 9 cases across 3 suites (step-0-preflight, step-2-announce-draft, step-3-site-bump)
 - **release-archive-sweep** — 10 cases across 3 suites (step-0-preflight, step-1-load-listing, step-2-emit-commands)
 - **release-audit-report** — 9 cases across 3 suites (step-0-preflight, step-1-gather-record, step-2-assemble-record)
-- **release-keys-sync** — 12 cases across 3 suites (step-0-preflight, step-1-key-fetch, step-2-svn-commands)
+- **release-keys-sync** — 14 cases across 3 suites (step-0-preflight, step-1-key-fetch, step-2-svn-commands)
 - **release-prepare** — 15 cases across 4 suites (step-0-preflight, step-1-plan, step-14-post, step-2-prep)
 - **release-promote** — 9 cases across 2 suites (step-0-preflight, step-2-emit-commands)
 - **release-rc-cut** — 16 cases across 4 suites (step-0-preflight, step-2-tag-build-sign, step-2b-reproducibility, step-3-staging)

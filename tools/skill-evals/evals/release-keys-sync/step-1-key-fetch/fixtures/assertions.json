@@ -8,5 +8,16 @@
     "type": "contains_all",
     "field": "strength_note",
     "substrings": ["no usable signing key or subkey", "add a signing subkey"]
+  },
+  "has_expired_subkey_note": {
+    "type": "contains_all",
+    "field": "strength_note",
+    "substrings": ["signing subkey", "expired"]
+  },
+  "has_no_expiry_advisory": {
+    "type": "contains",
+    "field": "strength_note",
+    "substring": "within 90 days",
+    "negate": true
   }
 }
