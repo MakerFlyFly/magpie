@@ -36,8 +36,11 @@ TODAY = dt.date(2026, 6, 19)
 CREATED = "1647302400"  # 2022-03-15
 
 
-def colons(algo: str, bits: str, curve: str = "", expires: str = "", fpr: str = FPR) -> str:
-    pub = ["pub", "-", bits, algo, "KEYID", CREATED, expires] + [""] * 9 + [curve, "", "0", ""]
+def colons(
+    algo: str, bits: str, curve: str = "", expires: str = "", fpr: str = FPR, caps: str = "scESC"
+) -> str:
+    pub = ["pub", "-", bits, algo, "KEYID", CREATED, expires] + [""] * 4 + [caps] + [""] * 4
+    pub += [curve, "", "0", ""]
     return "\n".join(
         [
             "tru::1:1791072876:0:3:1:5",
@@ -48,6 +51,21 @@ def colons(algo: str, bits: str, curve: str = "", expires: str = "", fpr: str = 
             "fpr:::::::::FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000:",
         ]
     )
+
+
+def subkey(
+    algo: str = "1",
+    bits: str = "4096",
+    curve: str = "",
+    expires: str = "",
+    *,
+    validity: str = "-",
+    caps: str = "s",
+    keyid: str = "SIGNSUB",
+    fpr: str = "B" * 40,
+) -> str:
+    sub = ["sub", validity, bits, algo, keyid, CREATED, expires] + [""] * 4 + [caps] + [""] * 4
+    return ":".join([*sub, curve, ""]) + f"\nfpr:::::::::{fpr}:"
 
 
 def check(text: str, fpr: str = FPR) -> dict:
@@ -268,6 +286,61 @@ class CheckKeyCliTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("error", out)
 
+    def test_cli_blocks_a_signing_subkey_without_changing_the_json_contract(self) -> None:
+        listing = colons("1", "4096", caps="cSC") + "\n" + subkey(bits="1024")
+        code, out = self.run_cli(
+            "--fingerprint", FPR, "--colons-file", self.colons_file(listing), "--today", TODAY.isoformat()
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual((out["verdict"], out["strength_check"]), ("blocked", "fail"))
+        self.assertEqual((out["algorithm"], out["bit_length"]), ("RSA", 4096))
+        self.assertEqual(
+            set(out),
+            {
+                "verdict",
+                "key_found",
+                "fingerprint",
+                "uid",
+                "algorithm",
+                "bit_length",
+                "created",
+                "expiry",
+                "strength_check",
+                "strength_note",
+            },
+        )
+
+    def test_cli_blocks_an_only_signer_already_expired_today(self) -> None:
+        listing = (
+            colons("1", "4096", caps="cSC")
+            + "\n"
+            + subkey("22", "255", curve="ed25519", expires=epoch(TODAY.isoformat()), validity="e")
+        )
+        code, out = self.run_cli(
+            "--fingerprint", FPR, "--colons-file", self.colons_file(listing), "--today", TODAY.isoformat()
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual((out["verdict"], out["strength_check"]), ("blocked", "fail"))
+        self.assertEqual((out["algorithm"], out["bit_length"], out["expiry"]), ("RSA", 4096, None))
+        self.assertIn("no usable signing key or subkey", out["strength_note"])
+        self.assertNotIn("within 90 days", out["strength_note"])
+
+    def test_cli_admits_a_replacement_after_a_weak_subkey_expires_today(self) -> None:
+        listing = "\n".join(
+            [
+                colons("1", "4096", caps="cSC"),
+                subkey(bits="1024", expires=epoch(TODAY.isoformat()), validity="e"),
+                subkey("22", "255", curve="ed25519", keyid="CURRENT"),
+            ]
+        )
+        code, out = self.run_cli(
+            "--fingerprint", FPR, "--colons-file", self.colons_file(listing), "--today", TODAY.isoformat()
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual((out["verdict"], out["strength_check"]), ("proceed", "pass"))
+        self.assertEqual((out["algorithm"], out["bit_length"], out["expiry"]), ("RSA", 4096, None))
+        self.assertIsNone(out["strength_note"])
+
 
 class ValidityTest(unittest.TestCase):
     """gpg's validity field: revoked, invalid and disabled keys never pass."""
@@ -291,6 +364,214 @@ class ValidityTest(unittest.TestCase):
         for validity in ("-", "u", "f", "q"):
             with self.subTest(validity=validity):
                 self.assertEqual(check(self.listing(validity))["verdict"], "proceed")
+
+    def test_disabled_capability_blocks_a_primary_with_a_strong_signing_subkey(self) -> None:
+        out = check(colons("1", "4096", caps="scSCD") + "\n" + subkey())
+        self.assertEqual(out["verdict"], "blocked")
+        self.assertIn("disabled", out["strength_note"])
+
+    def test_expired_today_primary_cannot_be_rescued_by_a_strong_subkey(self) -> None:
+        listing = colons("1", "4096", expires=epoch(TODAY.isoformat()), caps="scESC")
+        listing = listing.replace("pub:-:", "pub:e:", 1) + "\n" + subkey()
+        out = check(listing)
+        self.assertEqual((out["verdict"], out["strength_check"]), ("blocked", "fail"))
+        self.assertEqual(out["expiry"], TODAY.isoformat())
+        self.assertIn("expired", out["strength_note"])
+        self.assertNotIn("within 90 days", out["strength_note"])
+
+
+class SigningSubkeyTest(unittest.TestCase):
+    """All usable signers meet the floor; retired subkeys do not prevent rotation."""
+
+    def listing(self, *subkeys: str, caps: str = "cSC") -> str:
+        return "\n".join([colons("1", "4096", caps=caps), *subkeys])
+
+    def test_weak_signing_subkey_blocks(self) -> None:
+        out = check(self.listing(subkey(bits="1024")))
+        self.assertEqual((out["verdict"], out["strength_check"]), ("blocked", "fail"))
+        self.assertIn("signing subkey SIGNSUB: RSA 1024-bit key is below", out["strength_note"])
+        self.assertEqual((out["algorithm"], out["bit_length"]), ("RSA", 4096))
+
+    def test_strong_signing_subkey_proceeds(self) -> None:
+        out = check(self.listing(subkey("22", "255", curve="ed25519")))
+        self.assertEqual(out["verdict"], "proceed")
+        self.assertIsNone(out["strength_note"])
+
+    def test_certify_only_key_without_signing_subkey_blocks(self) -> None:
+        out = check(self.listing(caps="cC"))
+        self.assertEqual(out["verdict"], "blocked")
+        self.assertIn("no usable signing key or subkey", out["strength_note"])
+
+    def test_uppercase_aggregate_signing_capability_is_not_a_signer(self) -> None:
+        out = check(self.listing(subkey(caps="eS")))
+        self.assertEqual(out["verdict"], "blocked")
+        self.assertIn("no usable signing key or subkey", out["strength_note"])
+
+    def test_only_expired_signing_subkey_blocks_and_explains_why(self) -> None:
+        out = check(self.listing(subkey(expires=epoch("2026-06-18"))))
+        self.assertEqual(out["verdict"], "blocked")
+        self.assertIn("signing subkey SIGNSUB: key expired on 2026-06-18", out["strength_note"])
+        self.assertIn("no usable signing key or subkey", out["strength_note"])
+
+    def test_only_revoked_invalid_or_disabled_signing_subkey_blocks(self) -> None:
+        for validity, caps, word in (
+            ("r", "s", "revoked"),
+            ("i", "s", "invalid"),
+            ("d", "s", "disabled"),
+            ("-", "sD", "disabled"),
+        ):
+            with self.subTest(validity=validity, caps=caps):
+                out = check(self.listing(subkey(validity=validity, caps=caps)))
+                self.assertEqual(out["verdict"], "blocked")
+                self.assertIn(word, out["strength_note"])
+                self.assertIn("no usable signing key or subkey", out["strength_note"])
+
+    def test_retired_weak_subkeys_beside_a_strong_one_proceed(self) -> None:
+        for retired in (
+            subkey(bits="1024", expires=epoch("2020-01-01")),
+            subkey(bits="1024", validity="e", expires=epoch("2020-01-01")),
+            subkey(bits="1024", validity="r"),
+            subkey(bits="1024", validity="i"),
+            subkey(bits="1024", validity="d"),
+            subkey(bits="1024", caps="sD"),
+        ):
+            with self.subTest(retired=retired):
+                out = check(self.listing(retired, subkey(keyid="CURRENT")))
+                self.assertEqual(out["verdict"], "proceed")
+                self.assertIsNone(out["strength_note"])
+
+    def test_active_weak_signing_subkey_blocks_a_strong_signing_subkey(self) -> None:
+        out = check(self.listing(subkey(), subkey(bits="1024", keyid="WEAK")))
+        self.assertEqual(out["verdict"], "blocked")
+        self.assertIn("signing subkey WEAK", out["strength_note"])
+
+    def test_active_weak_signing_subkey_blocks_a_signing_primary(self) -> None:
+        out = check(self.listing(subkey(bits="1024"), caps="scESC"))
+        self.assertEqual(out["verdict"], "blocked")
+
+    def test_retired_signing_subkey_does_not_block_a_signing_primary(self) -> None:
+        out = check(self.listing(subkey(bits="1024", expires=epoch("2020-01-01")), caps="scESC"))
+        self.assertEqual(out["verdict"], "proceed")
+        self.assertIsNone(out["strength_note"])
+
+    def test_non_signing_subkeys_do_not_participate_in_the_floor(self) -> None:
+        for caps in ("e", "a"):
+            with self.subTest(caps=caps):
+                out = check(self.listing(subkey(bits="1024", caps=caps), caps="scESC"))
+                self.assertEqual(out["verdict"], "proceed")
+                self.assertIsNone(out["strength_note"])
+
+    def test_signing_subkey_strength_boundaries(self) -> None:
+        for algo, bits, curve, verdict in (
+            ("1", "2048", "", "proceed"),
+            ("1", "2047", "", "blocked"),
+            ("22", "255", "ed25519", "proceed"),
+            ("22", "448", "ed448", "proceed"),
+            ("19", "256", "nistp256", "proceed"),
+            ("19", "256", "secp256k1", "blocked"),
+            ("22", "255", "unknown", "blocked"),
+            ("18", "255", "cv25519", "blocked"),
+        ):
+            with self.subTest(algo=algo, bits=bits, curve=curve):
+                self.assertEqual(check(self.listing(subkey(algo, bits, curve)))["verdict"], verdict)
+
+    def test_dsa_signing_subkey_keeps_the_advisory(self) -> None:
+        out = check(self.listing(subkey("17", "2048")))
+        self.assertEqual(out["verdict"], "proceed")
+        self.assertIn("signing subkey SIGNSUB: DSA keys are discouraged", out["strength_note"])
+
+    def test_signing_subkey_expiry_within_90_days_is_advisory(self) -> None:
+        out = check(self.listing(subkey(expires=epoch("2026-08-01"))))
+        self.assertEqual(out["verdict"], "proceed")
+        self.assertIn("signing subkey SIGNSUB: key expires on 2026-08-01", out["strength_note"])
+
+    def test_signing_subkey_expiring_today_is_advisory(self) -> None:
+        out = check(self.listing(subkey(expires=epoch(TODAY.isoformat()))))
+        self.assertEqual(out["verdict"], "proceed")
+        self.assertIn("within 90 days", out["strength_note"])
+
+    def test_already_expired_today_weak_subkey_with_replacement_proceeds(self) -> None:
+        out = check(
+            self.listing(
+                subkey(bits="1024", expires=epoch(TODAY.isoformat()), validity="e"),
+                subkey("22", "255", curve="ed25519", keyid="CURRENT"),
+            )
+        )
+        self.assertEqual(out["verdict"], "proceed")
+        self.assertIsNone(out["strength_note"])
+
+    def test_already_expired_today_only_signer_blocks_without_advisory(self) -> None:
+        out = check(
+            self.listing(subkey("22", "255", curve="ed25519", expires=epoch(TODAY.isoformat()), validity="e"))
+        )
+        self.assertEqual((out["verdict"], out["strength_check"]), ("blocked", "fail"))
+        self.assertIn("signing subkey SIGNSUB:", out["strength_note"])
+        self.assertIn("expired", out["strength_note"])
+        self.assertIn("no usable signing key or subkey", out["strength_note"])
+        self.assertNotIn("within 90 days", out["strength_note"])
+
+    def test_earlier_today_cannot_clear_gpg_expired_status(self) -> None:
+        listing = self.listing(
+            subkey("22", "255", curve="ed25519", expires=epoch(TODAY.isoformat()), validity="e")
+        )
+        key = check_key.parse_colons(listing)[0]
+        out = check_key.assess(key, FPR, TODAY - dt.timedelta(days=1))
+        self.assertEqual(out["verdict"], "blocked")
+        self.assertIn("expired", out["strength_note"])
+        self.assertNotIn("within 90 days", out["strength_note"])
+
+    def test_already_expired_today_subkey_does_not_block_a_signing_primary(self) -> None:
+        out = check(
+            self.listing(subkey(bits="1024", expires=epoch(TODAY.isoformat()), validity="e"), caps="scESC")
+        )
+        self.assertEqual(out["verdict"], "proceed")
+        self.assertIsNone(out["strength_note"])
+
+    def test_far_future_signing_subkey_expiry_has_no_advisory(self) -> None:
+        out = check(self.listing(subkey(expires=epoch("2028-01-01"))))
+        self.assertEqual(out["verdict"], "proceed")
+        self.assertIsNone(out["strength_note"])
+
+    def test_unusable_primary_cannot_be_rescued_by_a_strong_subkey(self) -> None:
+        for validity in ("r", "i", "d"):
+            with self.subTest(validity=validity):
+                listing = self.listing(subkey()).replace("pub:-:", f"pub:{validity}:", 1)
+                self.assertEqual(check(listing)["verdict"], "blocked")
+        self.assertEqual(
+            check(colons("1", "4096", expires=epoch("2020-01-01"), caps="cSC") + "\n" + subkey())["verdict"],
+            "blocked",
+        )
+
+
+class SubkeyParsingTest(unittest.TestCase):
+    def test_subkey_fingerprint_never_replaces_the_primary_fingerprint(self) -> None:
+        listing = colons("1", "4096", caps="cSC") + "\n" + subkey(fpr="C" * 40)
+        keys = check_key.parse_colons(listing)
+        self.assertEqual(keys[0]["fingerprint"], FPR)
+        out = check(listing, "C" * 40)
+        self.assertFalse(out["key_found"])
+        self.assertEqual(out["verdict"], "blocked")
+
+    def test_subkeys_stay_with_their_own_primary(self) -> None:
+        second = "D" * 40
+        listing = "\n".join(
+            [
+                colons("1", "4096", caps="cSC"),
+                subkey(bits="1024", keyid="FIRST"),
+                colons("1", "4096", fpr=second, caps="cSC"),
+                subkey(keyid="SECOND"),
+            ]
+        )
+        keys = check_key.parse_colons(listing)
+        self.assertEqual(keys[0]["subkeys"][-1]["keyid"], "FIRST")
+        self.assertEqual(keys[1]["subkeys"][-1]["keyid"], "SECOND")
+        self.assertEqual(check(listing)["verdict"], "blocked")
+        self.assertEqual(check(listing, second)["verdict"], "proceed")
+
+    def test_orphan_subkey_is_not_attached_to_the_next_primary(self) -> None:
+        listing = subkey(bits="1024") + "\n" + colons("1", "4096")
+        self.assertEqual(check(listing)["verdict"], "proceed")
+        self.assertEqual(len(check_key.parse_colons(listing)[0]["subkeys"]), 1)
 
 
 if __name__ == "__main__":

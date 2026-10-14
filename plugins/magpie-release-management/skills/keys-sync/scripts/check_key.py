@@ -28,7 +28,13 @@ fingerprint differs from ``--fingerprint`` means ``key_found: false``.
 Prints the Step 1 JSON: algorithm / size floor (RSA and DSA >= 2048 bits,
 EdDSA and ECDSA on an accepted curve; secp256k1 is refused), the DSA
 advisory, and the advisory for an expiry within 90 days. A key that has
-already expired is a blocker, like a sub-floor key.
+already expired is a blocker, like a sub-floor key. Every usable signing
+subkey must meet the same floor, and at least one usable signing key or
+subkey must meet it. Retired signing subkeys do not prevent key rotation.
+GPG's expired validity is authoritative even on the expiry date. ``--today``
+overrides only calendar-date checks and advisories, not GPG's clock or
+computed validity. Historical replay needs a colon listing captured at
+the intended instant; an earlier date cannot reactivate an expired key.
 
 KEYS-directory mode (Step 2)::
 
@@ -59,6 +65,7 @@ EDDSA_CURVES = {"ed25519", "ed448"}
 ECDSA_CURVES = {"nistp256", "nistp384", "nistp521", "brainpoolp256r1", "brainpoolp384r1", "brainpoolp512r1"}
 FLOOR_BITS = 2048
 UNUSABLE_VALIDITY = {
+    "e": "key is expired (gpg marked it expired); extend its expiry or generate a new key",
     "r": "key is revoked; generate a new key",
     "i": "key is invalid (gpg could not validate it); fix or replace the key",
     "d": "key is disabled",
@@ -78,8 +85,22 @@ def _date(epoch: str) -> str | None:
     return dt.datetime.fromtimestamp(int(epoch), dt.UTC).date().isoformat()
 
 
+def _key_fields(f: list[str]) -> dict[str, Any]:
+    """Fields shared by primary keys and subkeys in a colon listing."""
+    return {
+        "validity": f[1],
+        "algo_id": f[3],
+        "bits": int(f[2]) if f[2].isdigit() else None,
+        "keyid": f[4],
+        "created": _date(f[5]),
+        "expiry": _date(f[6]),
+        "capabilities": f[11],
+        "curve": f[16].lower(),
+    }
+
+
 def parse_colons(text: str) -> list[dict[str, Any]]:
-    """Primary keys from ``gpg --with-colons --fixed-list-mode`` output."""
+    """Primary keys and their subkeys from ``gpg --with-colons --fixed-list-mode``."""
     keys: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     want_fpr = False
@@ -87,16 +108,7 @@ def parse_colons(text: str) -> list[dict[str, Any]]:
         f = line.split(":") + [""] * 20
         kind = f[0]
         if kind == "pub":
-            current = {
-                "validity": f[1],
-                "algo_id": f[3],
-                "bits": int(f[2]) if f[2].isdigit() else None,
-                "created": _date(f[5]),
-                "expiry": _date(f[6]),
-                "curve": f[16].lower(),
-                "fingerprint": None,
-                "uids": [],
-            }
+            current = {**_key_fields(f), "fingerprint": None, "uids": [], "subkeys": []}
             keys.append(current)
             want_fpr = True
         elif kind == "fpr" and current is not None and want_fpr:
@@ -104,9 +116,56 @@ def parse_colons(text: str) -> list[dict[str, Any]]:
             want_fpr = False
         elif kind == "sub":
             want_fpr = False
+            if current is not None:
+                current["subkeys"].append(_key_fields(f))
         elif kind == "uid" and current is not None and f[1] not in ("r", "e"):
             current["uids"].append(f[9])
     return keys
+
+
+def _check(key: dict[str, Any], today: dt.date) -> tuple[bool, list[str]]:
+    """Apply the existing strength, validity and expiry rules to one key."""
+    algorithm = ALGORITHMS.get(key["algo_id"])
+    notes: list[str] = []
+    passed = False
+    if algorithm in ("RSA", "DSA"):
+        bits = key["bits"]
+        passed = bits is not None and bits >= FLOOR_BITS
+        if not passed:
+            notes.append(
+                f"{algorithm} {bits}-bit key is below the ASF floor of {FLOOR_BITS} bits; "
+                "generate a new key that meets the floor"
+            )
+        if algorithm == "DSA":
+            notes.append("DSA keys are discouraged by ASF release-signing guidance")
+    elif algorithm == "EdDSA":
+        passed = key["curve"] in EDDSA_CURVES
+        if not passed:
+            notes.append(f"EdDSA curve {key['curve'] or 'unknown'!r} is not an accepted curve")
+    elif algorithm == "ECDSA":
+        passed = key["curve"] in ECDSA_CURVES
+        if not passed:
+            notes.append(f"ECDSA curve {key['curve'] or 'unknown'!r} is not P-256 or stronger")
+    else:
+        notes.append(f"public-key algorithm id {key['algo_id']} is not accepted for release signing")
+    # gpg's validity field: an expired, revoked, invalid or disabled key never signs a release,
+    # whatever its strength or expiry date says.
+    unusable = UNUSABLE_VALIDITY.get(key.get("validity", ""))
+    if not unusable and "D" in key["capabilities"]:
+        unusable = UNUSABLE_VALIDITY["d"]
+    if unusable:
+        passed = False
+        notes.append(unusable)
+    if key["expiry"]:
+        days = (dt.date.fromisoformat(key["expiry"]) - today).days
+        if days < 0:
+            passed = False
+            notes.append(f"key expired on {key['expiry']}; extend its expiry or generate a new key")
+        elif days <= EXPIRY_ADVISORY_DAYS and key["validity"] != "e":
+            notes.append(
+                f"key expires on {key['expiry']}, within {EXPIRY_ADVISORY_DAYS} days; consider extending it"
+            )
+    return passed, notes
 
 
 def assess(key: dict[str, Any] | None, fingerprint: str, today: dt.date) -> dict[str, Any]:
@@ -128,47 +187,35 @@ def assess(key: dict[str, Any] | None, fingerprint: str, today: dt.date) -> dict
     out.update(
         uid=key["uids"][0] if key["uids"] else None,
         algorithm=algorithm,
+        bit_length=key["bits"] if algorithm in ("RSA", "DSA") else None,
         created=key["created"],
         expiry=key["expiry"],
     )
-    notes: list[str] = []
-    passed = False
-    if algorithm in ("RSA", "DSA"):
-        bits = key["bits"]
-        out["bit_length"] = bits
-        passed = bits is not None and bits >= FLOOR_BITS
-        if not passed:
-            notes.append(
-                f"{algorithm} {bits}-bit key is below the ASF floor of {FLOOR_BITS} bits; "
-                "generate a new key that meets the floor"
-            )
-        if algorithm == "DSA":
-            notes.append("DSA keys are discouraged by ASF release-signing guidance")
-    elif algorithm == "EdDSA":
-        passed = key["curve"] in EDDSA_CURVES
-        if not passed:
-            notes.append(f"EdDSA curve {key['curve'] or 'unknown'!r} is not an accepted curve")
-    elif algorithm == "ECDSA":
-        passed = key["curve"] in ECDSA_CURVES
-        if not passed:
-            notes.append(f"ECDSA curve {key['curve'] or 'unknown'!r} is not P-256 or stronger")
-    else:
-        notes.append(f"public-key algorithm id {key['algo_id']} is not accepted for release signing")
-    # gpg's validity field: a revoked, invalid or disabled key never signs a release,
-    # whatever its strength or expiry date says.
-    unusable = UNUSABLE_VALIDITY.get(key.get("validity", ""))
-    if unusable:
-        passed = False
-        notes.append(unusable)
-    if key["expiry"]:
-        days = (dt.date.fromisoformat(key["expiry"]) - today).days
-        if days < 0:
+    passed, notes = _check(key, today)
+    # Uppercase capabilities on a primary describe the entire key group.
+    signer = passed and "s" in key["capabilities"]
+    retired: list[str] = []
+    for sub in key["subkeys"]:
+        if "s" not in sub["capabilities"]:
+            continue
+        sub_passed, sub_notes = _check(sub, today)
+        sub_notes = [f"signing subkey {sub['keyid']}: {note}" for note in sub_notes]
+        if sub_passed:
+            signer = True
+            notes.extend(sub_notes)
+        elif (
+            sub["validity"] in UNUSABLE_VALIDITY
+            or "D" in sub["capabilities"]
+            or (sub["expiry"] and dt.date.fromisoformat(sub["expiry"]) < today)
+        ):
+            retired.extend(sub_notes)
+        else:
             passed = False
-            notes.append(f"key expired on {key['expiry']}; extend its expiry or generate a new key")
-        elif days <= EXPIRY_ADVISORY_DAYS:
-            notes.append(
-                f"key expires on {key['expiry']}, within {EXPIRY_ADVISORY_DAYS} days; consider extending it"
-            )
+            notes.extend(sub_notes)
+    if not signer:
+        passed = False
+        notes.extend(retired)
+        notes.append("no usable signing key or subkey meets the ASF floor; add a signing subkey that does")
     out["strength_check"] = "pass" if passed else "fail"
     out["strength_note"] = "; ".join(notes) if notes else None
     out["verdict"] = "proceed" if passed else "blocked"
@@ -218,7 +265,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--key-file", help="fetched public key (armoured or binary); may be empty")
     parser.add_argument("--fingerprint")
-    parser.add_argument("--today", help="YYYY-MM-DD; defaults to the current UTC date")
+    parser.add_argument(
+        "--today",
+        help="YYYY-MM-DD for date checks; defaults to the current UTC date; GPG validity is unchanged",
+    )
     parser.add_argument("--keys-url", help="keys_file_url, for the KEYS-directory mode")
     parser.add_argument("--colons-file", help=argparse.SUPPRESS)  # tests: pre-captured gpg listing
     args = parser.parse_args(argv)

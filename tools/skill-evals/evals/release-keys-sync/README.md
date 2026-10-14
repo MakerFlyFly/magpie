@@ -5,12 +5,12 @@
 
 Behavioral evals for the `release-keys-sync` skill.
 
-## Suites (9 cases total)
+## Suites (14 cases total)
 
 | Suite | Step | Cases | What it covers |
 |---|---|---|---|
 | step-0-preflight | Step 0 (pre-flight check) | 3 | clean pass (proceed), fingerprint already in KEYS (noop), key rolled with different UID (blocked) |
-| step-1-key-fetch | Step 1 (fetch and validate key) | 3 | RSA 4096-bit key found and passes strength check, key not found on keyserver, weak RSA 1024-bit key fails floor |
+| step-1-key-fetch | Step 1 (fetch and validate key) | 8 | strong and missing keys, weak primary or signing subkey, no usable signer, rotation, already-expired same-day subkeys with and without a replacement |
 | step-2-svn-commands | Step 2 (draft KEYS block and command sequence) | 3 | standard ASF svnpubsub commands, Ed25519 key on non-ASF GitHub-hosted KEYS, RSA key expiring within 90 days triggers advisory |
 
 ## Run
