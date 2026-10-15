@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime as dt
 import io
@@ -201,17 +202,90 @@ class KeysDirTest(unittest.TestCase):
 
 @unittest.skipUnless(GPG and not MSYS_GPG, "requires gpg accepting native --homedir paths")
 class GpgTest(unittest.TestCase):
+    def run_cli(self, path: Path, fingerprint: str = PUBLIC_FPR) -> tuple[int, dict]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = check_key.main(["--key-file", str(path), "--fingerprint", fingerprint])
+        return code, json.loads(buf.getvalue())
+
     def test_garbage_file_imports_nothing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="keys sync ") as directory:
             path = Path(directory) / "not a key.asc"
             path.write_text("not a key\n", encoding="utf-8")
             self.assertNotIn("pub:", check_key.list_key_file(path))
 
+    def test_unicode_text_imports_nothing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="keys sync ") as directory:
+            path = Path(directory) / "not a key.asc"
+            path.write_text("这不是公钥\n", encoding="utf-8")
+            self.assertNotIn("pub:", check_key.list_key_file(path))
+
+    def test_directory_input_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="keys sync ") as directory:
+            code, out = self.run_cli(Path(directory))
+            self.assertEqual((code, set(out)), (2, {"error"}))
+            self.assertIn("--key-file", out["error"])
+            self.assertIn("regular file", out["error"])
+
+    def test_truncated_armored_public_key_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="keys sync ") as directory:
+            path = Path(directory) / "truncated key.asc"
+            path.write_text(PUBLIC_KEY[:160], encoding="ascii")
+            code, out = self.run_cli(path)
+            self.assertEqual((code, set(out)), (2, {"error"}))
+            self.assertIn("gpg --import failed (exit 2)", out["error"])
+
+    def test_other_malformed_armored_inputs_are_errors(self) -> None:
+        for public in (
+            PUBLIC_KEY.split("\n\n", 1)[0] + "\n",
+            PUBLIC_KEY.replace("=cHCJ", "=AAAA"),
+            PUBLIC_KEY + PUBLIC_KEY[:160],
+        ):
+            with (
+                self.subTest(public=public[:40]),
+                tempfile.TemporaryDirectory(prefix="keys sync ") as directory,
+            ):
+                path = Path(directory) / "malformed key.asc"
+                path.write_text(public, encoding="ascii")
+                code, out = self.run_cli(path)
+                self.assertEqual((code, set(out)), (2, {"error"}))
+                self.assertIn("gpg --import failed (exit 2)", out["error"])
+
     def test_valid_public_key_is_listed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="keys sync ") as directory:
             path = Path(directory) / "public key.asc"
             path.write_text(PUBLIC_KEY, encoding="ascii")
             keys = check_key.parse_colons(check_key.list_key_file(path))
+            self.assertEqual([key["fingerprint"] for key in keys], [PUBLIC_FPR])
+
+    def test_valid_binary_public_key_is_listed(self) -> None:
+        body = PUBLIC_KEY.split("\n\n", 1)[1].split("\n=", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="keys sync ") as directory:
+            path = Path(directory) / "public key.gpg"
+            path.write_bytes(base64.b64decode(body))
+            keys = check_key.parse_colons(check_key.list_key_file(path))
+            self.assertEqual([key["fingerprint"] for key in keys], [PUBLIC_FPR])
+
+    def test_valid_public_key_with_another_fingerprint_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="keys sync ") as directory:
+            path = Path(directory) / "public key.asc"
+            path.write_text(PUBLIC_KEY, encoding="ascii")
+            code, out = self.run_cli(path, "A" * 40)
+            self.assertEqual((code, out["verdict"], out["key_found"]), (0, "blocked", False))
+
+    def test_import_uses_the_bytes_read_before_the_file_changes(self) -> None:
+        original_run = check_key.subprocess.run
+        with tempfile.TemporaryDirectory(prefix="keys sync ") as directory:
+            path = Path(directory) / "public key.asc"
+            path.write_text(PUBLIC_KEY, encoding="ascii")
+
+            def replace_input(command, **kwargs):
+                if "--import" in command:
+                    path.write_text("not a key\n", encoding="utf-8")
+                return original_run(command, **kwargs)
+
+            with mock.patch.object(check_key.subprocess, "run", side_effect=replace_input):
+                keys = check_key.parse_colons(check_key.list_key_file(path))
             self.assertEqual([key["fingerprint"] for key in keys], [PUBLIC_FPR])
 
 
@@ -237,10 +311,10 @@ class GpgFailureTest(unittest.TestCase):
         self.path = Path(directory.name) / "public key.asc"
         self.path.write_text("not a key\n", encoding="utf-8")
 
-    def result(self, code: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess([], code, stdout, stderr)
+    def result(self, code: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess([], code, stdout.encode("utf-8"), stderr.encode("utf-8"))
 
-    def invoke(self, *results: subprocess.CompletedProcess[str] | OSError) -> tuple[int, dict, int]:
+    def invoke(self, *results: subprocess.CompletedProcess[bytes] | OSError) -> tuple[int, dict, int]:
         buf = io.StringIO()
         with (
             mock.patch.object(check_key.shutil, "which", return_value="test-gpg"),
@@ -375,6 +449,28 @@ class GpgFailureTest(unittest.TestCase):
         self.path.write_bytes(b"")
         code, out, calls = self.invoke()
         self.assertEqual((code, out["key_found"], calls), (0, False, 0))
+
+    def test_directory_is_rejected_before_the_empty_input_shortcut(self) -> None:
+        self.path.unlink()
+        self.path.mkdir()
+        code, out, calls = self.invoke(self.result(2, NO_DATA), self.result(0))
+        self.assert_error_input(code, out)
+        self.assertIn("regular file", out["error"])
+        self.assertEqual(calls, 0)
+
+    def test_read_error_is_reported_before_calling_gpg(self) -> None:
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("permission denied")):
+            code, out, calls = self.invoke(self.result(0), self.result(0, colons("1", "4096")))
+        self.assert_error_input(code, out)
+        self.assertIn("--key-file", out["error"])
+        self.assertIn("permission denied", out["error"])
+        self.assertEqual(calls, 0)
+
+    def test_no_data_does_not_hide_a_declared_public_key(self) -> None:
+        self.path.write_text(PUBLIC_KEY[:160], encoding="ascii")
+        code, out, calls = self.invoke(self.result(2, NO_DATA), self.result(0))
+        self.assert_error(code, out, "--import")
+        self.assertEqual(calls, 1)
 
     def test_bad_fingerprint_does_not_call_gpg(self) -> None:
         buf = io.StringIO()
