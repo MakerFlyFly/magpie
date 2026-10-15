@@ -42,7 +42,7 @@ Derives the svn directory to check out by stripping ``/KEYS``; rejects a
 URL under ``dist/dev`` and one that does not end in ``/KEYS``. Commands stay with the Release Manager; this script
 never contacts a keyserver or a repository.
 
-Exit 0 on success, 2 on bad input or when gpg is unavailable.
+Exit 0 on a completed assessment, 2 on bad input or a gpg execution error.
 """
 
 from __future__ import annotations
@@ -245,6 +245,57 @@ def assess(key: dict[str, Any] | None, fingerprint: str, today: dt.date) -> dict
     return out
 
 
+def _run_gpg(command: list[str], stage: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as exc:
+        raise InputError(f"gpg {stage} could not run: {exc}") from exc
+
+
+def _gpg_error(stage: str, result: subprocess.CompletedProcess[str]) -> InputError:
+    diagnostic = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+    return InputError(f"gpg {stage} failed (exit {result.returncode}): {diagnostic}")
+
+
+def _only_no_key_data(result: subprocess.CompletedProcess[str]) -> bool:
+    """Recognise an empty import without relying on localised stderr text."""
+    if result.returncode != 2:
+        return False
+    no_data = False
+    empty_import = False
+    for line in result.stdout.splitlines():
+        if not line.startswith("[GNUPG:] "):
+            continue
+        fields = line.removeprefix("[GNUPG:] ").split()
+        if not fields:
+            continue
+        status, *args = fields
+        if status == "NODATA":
+            if len(args) != 1 or args[0] not in {"1", "2", "3", "4"}:
+                return False
+            no_data = True
+        elif status == "IMPORT_RES":
+            # DETAILS defines at least 14 counters; newer versions may append more.
+            if len(args) < 14 or any(
+                not value.isascii() or not value.isdecimal() or int(value) for value in args
+            ):
+                return False
+            empty_import = True
+        elif status in {"ERROR", "IMPORT_PROBLEM", "IMPORT_OK", "IMPORTED"}:
+            return False
+        elif status == "FAILURE" and args != ["gpg-exit", "33554433"]:
+            # GPG 2.4 appends this generic failure even for a plain NODATA import.
+            return False
+    return no_data and empty_import
+
+
 def list_key_file(path: Path) -> str:
     gpg = shutil.which("gpg")
     if not gpg:
@@ -253,13 +304,14 @@ def list_key_file(path: Path) -> str:
     try:
         os.chmod(home, 0o700)
         base = [gpg, "--homedir", home, "--batch", "--no-autostart", "--no-tty"]
-        subprocess.run([*base, "--import", str(path)], capture_output=True, check=False)
-        listing = subprocess.run(
-            [*base, "--with-colons", "--fixed-list-mode", "--list-keys"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        imported = _run_gpg([*base, "--status-fd", "1", "--import", str(path)], "--import")
+        if imported.returncode and not _only_no_key_data(imported):
+            raise _gpg_error("--import", imported)
+        listing = _run_gpg([*base, "--with-colons", "--fixed-list-mode", "--list-keys"], "--list-keys")
+        if listing.returncode:
+            raise _gpg_error("--list-keys", listing)
+        if imported.returncode and any(line.startswith("pub:") for line in listing.stdout.splitlines()):
+            raise _gpg_error("--import", imported)
         return listing.stdout
     finally:
         shutil.rmtree(home, ignore_errors=True)
