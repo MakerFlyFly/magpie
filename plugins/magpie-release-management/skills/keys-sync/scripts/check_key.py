@@ -25,6 +25,8 @@ The key file is imported into a throw-away ``GNUPGHOME`` created for this
 run and deleted afterwards — never the user's keyring — and read back with
 ``gpg --with-colons``. An empty file, a file with no key, or a key whose
 fingerprint differs from ``--fingerprint`` means ``key_found: false``.
+Unreadable or non-regular input, and a declared public-key block that
+fails to import, are errors rather than evidence of a missing key.
 Prints the Step 1 JSON: algorithm / size floor (RSA and DSA >= 2048 bits,
 EdDSA and ECDSA on an accepted curve; secp256k1 is refused), the DSA
 advisory, and the advisory for an expiry within 90 days. A key that has
@@ -38,7 +40,7 @@ Derives the svn directory to check out by stripping ``/KEYS``; rejects a
 URL under ``dist/dev`` and one that does not end in ``/KEYS``. Commands stay with the Release Manager; this script
 never contacts a keyserver or a repository.
 
-Exit 0 on success, 2 on bad input or when gpg is unavailable.
+Exit 0 on a completed assessment, 2 on bad input or a gpg execution error.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ import datetime as dt
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -175,7 +178,72 @@ def assess(key: dict[str, Any] | None, fingerprint: str, today: dt.date) -> dict
     return out
 
 
+def _run_gpg(
+    command: list[str], stage: str, *, input_data: bytes | None = None
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command,
+            input=input_data,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise InputError(f"gpg {stage} could not run: {exc}") from exc
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        result.stdout.decode("utf-8", errors="replace"),
+        result.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def _gpg_error(stage: str, result: subprocess.CompletedProcess[str]) -> InputError:
+    diagnostic = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+    return InputError(f"gpg {stage} failed (exit {result.returncode}): {diagnostic}")
+
+
+def _only_no_key_data(result: subprocess.CompletedProcess[str], key_data: bytes) -> bool:
+    """Recognise an empty import without relying on localised stderr text."""
+    if result.returncode != 2 or b"-----BEGIN PGP PUBLIC KEY BLOCK-----" in key_data:
+        return False
+    no_data = False
+    empty_import = False
+    for line in result.stdout.splitlines():
+        if not line.startswith("[GNUPG:] "):
+            continue
+        fields = line.removeprefix("[GNUPG:] ").split()
+        if not fields:
+            continue
+        status, *args = fields
+        if status == "NODATA":
+            if len(args) != 1 or args[0] not in {"1", "2", "3", "4"}:
+                return False
+            no_data = True
+        elif status == "IMPORT_RES":
+            # DETAILS defines at least 14 counters; newer versions may append more.
+            if len(args) < 14 or any(
+                not value.isascii() or not value.isdecimal() or int(value) for value in args
+            ):
+                return False
+            empty_import = True
+        elif status in {"ERROR", "IMPORT_PROBLEM", "IMPORT_OK", "IMPORTED"}:
+            return False
+        elif status == "FAILURE" and args != ["gpg-exit", "33554433"]:
+            # GPG 2.4 appends this generic failure even for a plain NODATA import.
+            return False
+    return no_data and empty_import
+
+
 def list_key_file(path: Path) -> str:
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise InputError(f"cannot read --key-file {path}: not a regular file")
+        key_data = path.read_bytes()
+    except OSError as exc:
+        raise InputError(f"cannot read --key-file {path}: {exc}") from exc
+    if not key_data:
+        return ""
     gpg = shutil.which("gpg")
     if not gpg:
         raise InputError("gpg not found on PATH")
@@ -183,13 +251,14 @@ def list_key_file(path: Path) -> str:
     try:
         os.chmod(home, 0o700)
         base = [gpg, "--homedir", home, "--batch", "--no-autostart", "--no-tty"]
-        subprocess.run([*base, "--import", str(path)], capture_output=True, check=False)
-        listing = subprocess.run(
-            [*base, "--with-colons", "--fixed-list-mode", "--list-keys"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        imported = _run_gpg([*base, "--status-fd", "1", "--import"], "--import", input_data=key_data)
+        if imported.returncode and not _only_no_key_data(imported, key_data):
+            raise _gpg_error("--import", imported)
+        listing = _run_gpg([*base, "--with-colons", "--fixed-list-mode", "--list-keys"], "--list-keys")
+        if listing.returncode:
+            raise _gpg_error("--list-keys", listing)
+        if imported.returncode and any(line.startswith("pub:") for line in listing.stdout.splitlines()):
+            raise _gpg_error("--import", imported)
         return listing.stdout
     finally:
         shutil.rmtree(home, ignore_errors=True)
@@ -233,8 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.colons_file:
             colons = Path(args.colons_file).read_text(encoding="utf-8")
         else:
-            path = Path(args.key_file)
-            colons = list_key_file(path) if path.stat().st_size else ""
+            colons = list_key_file(Path(args.key_file))
         match = next((k for k in parse_colons(colons) if k["fingerprint"] == fpr), None)
         out = assess(match, fpr, today)
     except (InputError, OSError, ValueError) as exc:
