@@ -25,6 +25,8 @@ The key file is imported into a throw-away ``GNUPGHOME`` created for this
 run and deleted afterwards — never the user's keyring — and read back with
 ``gpg --with-colons``. An empty file, a file with no key, or a key whose
 fingerprint differs from ``--fingerprint`` means ``key_found: false``.
+Unreadable or non-regular input, and a declared public-key block that
+fails to import, are errors rather than evidence of a missing key.
 Prints the Step 1 JSON: algorithm / size floor (RSA and DSA >= 2048 bits,
 EdDSA and ECDSA on an accepted curve; secp256k1 is refused), the DSA
 advisory, and the advisory for an expiry within 90 days. A key that has
@@ -48,6 +50,7 @@ import datetime as dt
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -175,18 +178,24 @@ def assess(key: dict[str, Any] | None, fingerprint: str, today: dt.date) -> dict
     return out
 
 
-def _run_gpg(command: list[str], stage: str) -> subprocess.CompletedProcess[str]:
+def _run_gpg(
+    command: list[str], stage: str, *, input_data: bytes | None = None
+) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
+        result = subprocess.run(
             command,
+            input=input_data,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             check=False,
         )
     except OSError as exc:
         raise InputError(f"gpg {stage} could not run: {exc}") from exc
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        result.stdout.decode("utf-8", errors="replace"),
+        result.stderr.decode("utf-8", errors="replace"),
+    )
 
 
 def _gpg_error(stage: str, result: subprocess.CompletedProcess[str]) -> InputError:
@@ -194,9 +203,9 @@ def _gpg_error(stage: str, result: subprocess.CompletedProcess[str]) -> InputErr
     return InputError(f"gpg {stage} failed (exit {result.returncode}): {diagnostic}")
 
 
-def _only_no_key_data(result: subprocess.CompletedProcess[str]) -> bool:
+def _only_no_key_data(result: subprocess.CompletedProcess[str], key_data: bytes) -> bool:
     """Recognise an empty import without relying on localised stderr text."""
-    if result.returncode != 2:
+    if result.returncode != 2 or b"-----BEGIN PGP PUBLIC KEY BLOCK-----" in key_data:
         return False
     no_data = False
     empty_import = False
@@ -227,6 +236,14 @@ def _only_no_key_data(result: subprocess.CompletedProcess[str]) -> bool:
 
 
 def list_key_file(path: Path) -> str:
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise InputError(f"cannot read --key-file {path}: not a regular file")
+        key_data = path.read_bytes()
+    except OSError as exc:
+        raise InputError(f"cannot read --key-file {path}: {exc}") from exc
+    if not key_data:
+        return ""
     gpg = shutil.which("gpg")
     if not gpg:
         raise InputError("gpg not found on PATH")
@@ -234,8 +251,8 @@ def list_key_file(path: Path) -> str:
     try:
         os.chmod(home, 0o700)
         base = [gpg, "--homedir", home, "--batch", "--no-autostart", "--no-tty"]
-        imported = _run_gpg([*base, "--status-fd", "1", "--import", str(path)], "--import")
-        if imported.returncode and not _only_no_key_data(imported):
+        imported = _run_gpg([*base, "--status-fd", "1", "--import"], "--import", input_data=key_data)
+        if imported.returncode and not _only_no_key_data(imported, key_data):
             raise _gpg_error("--import", imported)
         listing = _run_gpg([*base, "--with-colons", "--fixed-list-mode", "--list-keys"], "--list-keys")
         if listing.returncode:
@@ -285,8 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.colons_file:
             colons = Path(args.colons_file).read_text(encoding="utf-8")
         else:
-            path = Path(args.key_file)
-            colons = list_key_file(path) if path.stat().st_size else ""
+            colons = list_key_file(Path(args.key_file))
         match = next((k for k in parse_colons(colons) if k["fingerprint"] == fpr), None)
         out = assess(match, fpr, today)
     except (InputError, OSError, ValueError) as exc:
