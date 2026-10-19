@@ -551,6 +551,23 @@ def test_retry_after_can_be_an_http_date(monkeypatch: pytest.MonkeyPatch, config
         client.get_json(config, "/t/42.json")
 
 
+def test_interrupted_http_error_body_keeps_the_http_status(
+    monkeypatch: pytest.MonkeyPatch, forum_env: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    error = _http_error(503)
+
+    def interrupted() -> bytes:
+        raise http.client.IncompleteRead(b"partial", 10)
+
+    monkeypatch.setattr(error, "read", interrupted)
+    forum = _serve(monkeypatch, {"/t/42.json": error})
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "HTTP 503" in output.err
+    assert len(forum.requests) == 1
+
+
 @pytest.mark.parametrize("headers", [{}, {"Api-Key": "test-key", "Api-Username": "reader"}])
 def test_equivalent_origins_preserve_read_headers(headers: dict[str, str]) -> None:
     request = urllib.request.Request(f"{BASE}/t/42.json", headers=headers)
