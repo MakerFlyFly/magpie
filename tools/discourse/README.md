@@ -75,20 +75,27 @@ stdout encodings; parsing it restores the original Unicode text and emoji.
 
 | Variable | Description |
 |---|---|
-| `DISCOURSE_URL` | Required. The forum's `https://` base URL, including the sub-folder for a sub-folder install (`https://example.org/forum`). No credentials, query or fragment, including empty `?` or `#` markers. |
+| `DISCOURSE_URL` | Required. The forum's `https://` base URL, including the sub-folder for a sub-folder install (`https://example.org/forum`). No credentials, query, fragment or ambiguous path; the final base-path segment must not carry `;` parameters, including empty parameters. |
 | `DISCOURSE_API_KEY` | Optional. API key for authorised reads. Sent only within `DISCOURSE_URL`'s origin and forum path. |
-| `DISCOURSE_API_USERNAME` | Required when `DISCOURSE_API_KEY` is set. The user the key acts as. |
+| `DISCOURSE_API_USERNAME` | Required when `DISCOURSE_API_KEY` is set. The ASCII username the key acts as; non-ASCII usernames are unsupported. |
 
 A topic URL on any other host or scheme is refused.
 Initial requests and redirects must stay within the configured forum's origin
 and path, with a complete path-segment boundary (`/forum` does not include `/forum-other`).
-Encoded dot segments, backslashes and ambiguous path escapes are refused.
+Both the original URL path and the decoded path must match that boundary.
+Encoded separators, dot segments, backslashes and malformed path escapes are refused.
+Paths are decoded once as UTF-8 for validation; a remaining `%` is refused,
+so literal-percent escapes (`%25`) and nested escapes (`%2541`) are unsupported.
+These restrictions apply to paths; normal UTF-8 slugs, topic share parameters
+and Unicode post bodies remain supported.
 The transport only permits GET requests and uses the standard library's GET
 redirect rules after these checks.
 Origins compare the scheme, hostname and effective port; an omitted HTTPS
 port is equivalent to `443`.
-Both API credentials must be encodable as latin-1 HTTP headers; unsupported
-values fail before a request without including the credential in the error.
+API usernames must contain only ASCII characters; API keys must be encodable
+as latin-1 HTTP headers.
+Unsupported credentials and invalid base paths fail during configuration
+validation, before a request, without including credential values in the error.
 Topic share URLs may include query parameters or fragments.
 Topic ids and `--max-posts` must be positive integers.
 

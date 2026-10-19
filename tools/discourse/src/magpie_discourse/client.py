@@ -45,6 +45,7 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def __init__(self, base_url: str) -> None:
         self._origin = origin(parse_url(base_url))
+        self._raw_path = urllib.parse.urlsplit(base_url).path.rstrip("/")
         self._path = _checked_path(base_url).rstrip("/")
 
     def check_request(self, request: urllib.request.Request) -> None:
@@ -55,11 +56,13 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def _check_url(self, url: str) -> None:
         destination = parse_url(url)
+        raw_path = urllib.parse.urlsplit(url).path
         path = _checked_path(url)
         if (
             origin(destination) != self._origin
             or destination.username is not None
-            or (self._path and path != self._path and not path.startswith(f"{self._path}/"))
+            or not _is_under_path(raw_path, self._raw_path)
+            or not _is_under_path(path, self._path)
         ):
             raise DiscourseError(
                 "Discourse request is outside the configured forum; refusing to forward credentials"
@@ -75,7 +78,7 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         newurl: str,
     ) -> urllib.request.Request | None:
         self.check_request(req)
-        # Check before urljoin/urlparse can normalise away unsafe path characters.
+        # Validate the supplied target too; urllib may already have normalised Location.
         _checked_path(newurl)
         try:
             target = urllib.parse.urljoin(req.full_url, newurl)
@@ -102,26 +105,31 @@ def parse_url(value: str) -> urllib.parse.ParseResult:
 
 
 def _checked_path(url: str) -> str:
-    """Decode a path for boundary checks, rejecting ambiguous traversal forms."""
+    """Decode a path once, rejecting encoded separators and ambiguous escapes."""
     message = "Invalid Discourse URL path; refusing to forward credentials"
     if any(ord(char) < 32 or ord(char) == 127 for char in url):
         raise DiscourseError(message)
-    path = parse_url(url).path
-    while True:
-        if (
-            "\\" in path
-            or any(ord(char) < 32 or ord(char) == 127 for char in path)
-            or any(segment in (".", "..") for segment in path.split("/"))
-            or re.search(r"%(?![0-9a-fA-F]{2})", path)
-        ):
-            raise DiscourseError(message)
-        try:
-            decoded = urllib.parse.unquote(path, errors="strict")
-        except UnicodeDecodeError as exc:
-            raise DiscourseError(message) from exc
-        if decoded == path:
-            return path
-        path = decoded
+    parse_url(url)
+    path = urllib.parse.urlsplit(url).path
+    if re.search(r"%(?![0-9a-fA-F]{2})|%(?:2f|5c)", path, re.IGNORECASE):
+        raise DiscourseError(message)
+    try:
+        path = urllib.parse.unquote(path, errors="strict")
+    except UnicodeDecodeError as exc:
+        raise DiscourseError(message) from exc
+    if (
+        "%" in path
+        or "\\" in path
+        or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        or any(segment in (".", "..") for segment in path.split("/"))
+    ):
+        raise DiscourseError(message)
+    return path
+
+
+def _is_under_path(path: str, base_path: str) -> bool:
+    """Check a complete path-segment boundary without changing its spelling."""
+    return not base_path or path == base_path or path.startswith(f"{base_path}/")
 
 
 @dataclass(frozen=True)
@@ -143,6 +151,14 @@ def load_config() -> DiscourseConfig:
         raise DiscourseError("DISCOURSE_URL must be an https:// URL")
     if "?" in raw_url or "#" in raw_url or parsed.username is not None:
         raise DiscourseError("DISCOURSE_URL must not carry credentials, a query or a fragment")
+    base_url = raw_url.rstrip("/")
+    path_error = "DISCOURSE_URL has an invalid or ambiguous path"
+    try:
+        _checked_path(base_url)
+    except DiscourseError as exc:
+        raise DiscourseError(path_error) from exc
+    if ";" in urllib.parse.urlsplit(base_url).path.rsplit("/", 1)[-1]:
+        raise DiscourseError(path_error)
 
     api_key = os.environ.get("DISCOURSE_API_KEY", "").strip() or None
     api_username = os.environ.get("DISCOURSE_API_USERNAME", "").strip() or None
@@ -150,14 +166,15 @@ def load_config() -> DiscourseConfig:
         raise DiscourseError("DISCOURSE_API_USERNAME is required when DISCOURSE_API_KEY is set")
     if any("\r" in value or "\n" in value for value in (api_key or "", api_username or "")):
         raise DiscourseError("Discourse API credentials must not contain newlines")
-    for variable, value in (("DISCOURSE_API_KEY", api_key), ("DISCOURSE_API_USERNAME", api_username)):
-        if value is not None:
-            try:
-                value.encode("latin-1")
-            except UnicodeEncodeError as exc:
-                raise DiscourseError(f"{variable} must be encodable as a latin-1 HTTP header") from exc
+    if api_username is not None and not api_username.isascii():
+        raise DiscourseError("DISCOURSE_API_USERNAME must contain only ASCII characters")
+    if api_key is not None:
+        try:
+            api_key.encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise DiscourseError("DISCOURSE_API_KEY must be encodable as a latin-1 HTTP header") from exc
 
-    return DiscourseConfig(base_url=raw_url.rstrip("/"), api_key=api_key, api_username=api_username)
+    return DiscourseConfig(base_url=base_url, api_key=api_key, api_username=api_username)
 
 
 def auth_headers(config: DiscourseConfig) -> dict[str, str]:

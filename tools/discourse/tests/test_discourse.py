@@ -21,10 +21,12 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import socket
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import urllib.response
 from email.message import Message
 from typing import Any
 
@@ -600,19 +602,21 @@ def test_cli_rejects_unencodable_headers_without_leaking_values_or_requesting(
     output = capsys.readouterr()
     assert output.out == ""
     assert variable in output.err
-    assert "latin-1" in output.err
+    assert ("ASCII" if variable == "DISCOURSE_API_USERNAME" else "latin-1") in output.err
     assert "private-" not in output.err
     assert "Traceback" not in output.err
     assert forum.requests == []
 
 
-def test_cli_preserves_latin1_credentials(monkeypatch: pytest.MonkeyPatch, forum_env: None) -> None:
+def test_cli_preserves_a_latin1_key_with_an_ascii_username(
+    monkeypatch: pytest.MonkeyPatch, forum_env: None
+) -> None:
     monkeypatch.setenv("DISCOURSE_API_KEY", "cl\u00e9")
-    monkeypatch.setenv("DISCOURSE_API_USERNAME", "Andr\u00e9")
+    monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
     forum = _serve(monkeypatch, {"/t/42.json": _topic([], [])})
     assert package_main(["topic", "view", "42"]) == 0
     assert forum.requests[0].get_header("Api-key") == "cl\u00e9"
-    assert forum.requests[0].get_header("Api-username") == "Andr\u00e9"
+    assert forum.requests[0].get_header("Api-username") == "reader"
 
 
 @pytest.mark.parametrize("encoding", ["cp1252", "cp936"])
@@ -788,3 +792,186 @@ def test_cli_transport_binds_redirects_to_the_configured_forum(
     assert output.out == ""
     assert "refusing to forward credentials" in output.err
     assert len(requests) == 1
+
+
+def _serve_redirect(monkeypatch: pytest.MonkeyPatch, location: str) -> list[urllib.request.Request]:
+    """Exercise urllib's real redirect chain without opening any connection."""
+    requests: list[urllib.request.Request] = []
+    original_build_opener = urllib.request.build_opener
+
+    class RedirectResponse(urllib.response.addinfourl):
+        msg: str
+
+    class FakeHTTPS(urllib.request.HTTPSHandler):
+        def https_open(self, request: urllib.request.Request) -> Any:
+            requests.append(request)
+            headers = Message()
+            if len(requests) == 1:
+                code, body = 302, b""
+                headers["Location"] = location
+            else:
+                assert len(requests) == 2, "Unexpected extra redirect request"
+                code = 200
+                body = json.dumps(_topic([_post(100, 1)], [100])).encode("utf-8")
+            response = RedirectResponse(io.BytesIO(body), headers, request.full_url, code)
+            response.msg = "Found" if code == 302 else "OK"
+            return response
+
+    class BlockHTTP(urllib.request.HTTPHandler):
+        def http_open(self, request: urllib.request.Request) -> Any:
+            pytest.fail("An HTTP redirect reached the transport")
+
+    def build_opener(*handlers: Any) -> urllib.request.OpenerDirector:
+        return original_build_opener(*handlers, FakeHTTPS(), BlockHTTP())
+
+    def unexpected_connection(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("A redirect test attempted a real network connection")
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setattr(socket, "create_connection", unexpected_connection)
+    return requests
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("/forum/t/slug/42.json", f"{BASE}/forum/t/slug/42.json"),
+        ("slug/42.json", f"{BASE}/forum/t/slug/42.json"),
+        ("/forum;", f"{BASE}/forum"),
+        (f"{BASE}:443/forum/t/slug/42.json", f"{BASE}:443/forum/t/slug/42.json"),
+        ("/forum/t/%E4%B8%AD%E6%96%87/42.json", f"{BASE}/forum/t/%E4%B8%AD%E6%96%87/42.json"),
+        (
+            "/forum/t/\u4e2d\u6587/42.json".encode().decode("latin-1"),
+            f"{BASE}/forum/t/%E4%B8%AD%E6%96%87/42.json",
+        ),
+        ("/forum/t/slug/42.json?u=100%25", f"{BASE}/forum/t/slug/42.json?u=100%25"),
+    ],
+)
+def test_cli_follows_real_urllib_redirects_with_read_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    location: str,
+    expected: str,
+) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", f"{BASE}/forum")
+    monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
+    monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
+    requests = _serve_redirect(monkeypatch, location)
+    assert package_main(["topic", "view", "42"]) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["thread_id"] == "42"
+    assert output.err == ""
+    assert [request.full_url for request in requests] == [f"{BASE}/forum/t/42.json", expected]
+    for request in requests:
+        assert request.get_method() == "GET"
+        assert request.get_header("Api-key") == "test-key"
+        assert request.get_header("Api-username") == "reader"
+        assert request.get_header("Accept") == "application/json"
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "/other-app/collect",
+        "/forum-other/collect",
+        "/forum/../other-app/collect",
+        "//evil.example.test/forum/t/42.json",
+        "http://forum.example.test/forum/t/42.json",
+        "/forum%2Fcollect",
+        "/forum%2fother-app/collect",
+        "/forum%252Fcollect",
+        "/%66orum/collect",
+        "/for%75m/collect",
+        "/forum;v=1",
+        "/forum/t/with%2Fslash/42.json",
+        "/forum/t/100%25-done/42.json",
+        "/forum/t/%2541/42.json",
+    ],
+)
+def test_cli_rejects_unsafe_real_urllib_redirects_before_the_second_request(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    location: str,
+) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", f"{BASE}/forum")
+    monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
+    monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
+    requests = _serve_redirect(monkeypatch, location)
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "magpie-discourse error:" in output.err
+    assert "test-key" not in output.err
+    assert "Traceback" not in output.err
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/forum/..",
+        "/forum/./",
+        "/forum%zz",
+        "/forum\\x",
+        "/forum;v=1",
+        "/forum;",
+        "/forum;v=1/",
+        "/forum/%25",
+        "/forum/%2541",
+        "/forum%2Fother",
+        "/forum/%FF",
+        "/forum/%0a",
+    ],
+)
+def test_cli_rejects_invalid_base_paths_before_requesting(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    path: str,
+) -> None:
+    url = f"{BASE}{path}"
+    monkeypatch.setenv("DISCOURSE_URL", url)
+    route = urllib.parse.urlparse(f"{url.rstrip('/')}/t/42.json").path
+    forum = _serve(monkeypatch, {route: _topic([], [])})
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "DISCOURSE_URL has an invalid or ambiguous path" in output.err
+    assert "Traceback" not in output.err
+    assert forum.requests == []
+
+
+@pytest.mark.parametrize("username", ["Andr\u00e9", "\u5f20\u4e09", "reader\U0001f44d"])
+def test_cli_rejects_non_ascii_usernames_before_requesting(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    username: str,
+) -> None:
+    monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
+    monkeypatch.setenv("DISCOURSE_API_USERNAME", username)
+    forum = _serve(monkeypatch, {"/t/42.json": _topic([], [])})
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "DISCOURSE_API_USERNAME" in output.err
+    assert "ASCII" in output.err
+    assert username not in output.err
+    assert "test-key" not in output.err
+    assert "Traceback" not in output.err
+    assert forum.requests == []
+
+
+@pytest.mark.parametrize("path", ["/%66orum/collect", "/forum;v=1", "/forum%2Fcollect", "/forum/t/%2541"])
+def test_transport_rejects_raw_path_aliases_before_opening(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    def unexpected_open(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("An ambiguous initial request reached the opener")
+
+    monkeypatch.setattr(urllib.request, "build_opener", unexpected_open)
+    request = urllib.request.Request(f"{BASE}{path}")
+    with pytest.raises(DiscourseError):
+        client._urlopen(request, 30, base_url=f"{BASE}/forum")
