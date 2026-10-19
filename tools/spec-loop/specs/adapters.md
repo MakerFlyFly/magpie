@@ -2,7 +2,7 @@
      https://www.apache.org/licenses/LICENSE-2.0 -->
 
 ---
-title: Adapters (Gmail / PonyMail / Jira / GitHub / GitLab / Bitbucket / Forgejo / mail-source / SourceHut / maildir / VCS / Fossil / change-request / chat / typed-decision)
+title: Adapters (Gmail / PonyMail / Jira / GitHub / GitLab / Bitbucket / Forgejo / Discourse / mail-source / SourceHut / maildir / VCS / Fossil / change-request / chat / typed-decision)
 status: experimental
 kind: feature
 mode: infra
@@ -15,7 +15,7 @@ source: >
   tools/asf-svn/, tools/mail-archive/, tools/mail-patch/,
   tools/jira-patch/, tools/forwarder-relay/, tools/github-body-field/,
   tools/github-rollup/, tools/gitlab/, tools/chat/, tools/chat-slack/,
-  tools/chat-discord/, tools/forgejo/, tools/fossil/, tools/asf-nexus/, tools/typed-decision/.
+  tools/chat-discord/, tools/forgejo/, tools/discourse/, tools/fossil/, tools/asf-nexus/, tools/typed-decision/.
 acceptance:
   - Project-specific integrations live behind adapter modules, not
     hardcoded into skills.
@@ -25,7 +25,7 @@ acceptance:
     redactor before any LLM read.
 ---
 
-# Adapters (Gmail / PonyMail / Jira / GitHub / GitLab / Bitbucket / Forgejo / SourceHut / maildir / VCS / Fossil / change-request / chat / typed-decision)
+# Adapters (Gmail / PonyMail / Jira / GitHub / GitLab / Bitbucket / Forgejo / Discourse / SourceHut / maildir / VCS / Fossil / change-request / chat / typed-decision)
 
 ## What it does
 
@@ -156,6 +156,18 @@ by swapping the adapter, not the skill.
   backend yet; deeper Jira handoff, Data Center
   review/merge writes, broader repository permissions, and fuller Pipelines
   run/log/retry coverage remain tracked in #606.
+- `tools/discourse/` (`magpie-discourse`) — partial, read-only Discourse
+  forum bridge, declared `contract:mail-archive` with `**Coverage:** partial`.
+  `topic view <id|url>` reads one topic and its post stream (in batches of
+  20, capped by `--max-posts` with a `truncated` flag) and prints it in the
+  mail-archive `thread_data` shape. Public forums are read anonymously;
+  missing requested posts and malformed responses fail explicitly rather
+  than returning a successful incomplete thread. Coverage is not complete
+  or selectable as an archive backend yet.
+  `DISCOURSE_API_KEY` + `DISCOURSE_API_USERNAME` cover private categories
+  and are only sent to the `DISCOURSE_URL` origin. Topic list, search,
+  user activity, guarded writes and the remaining mail-archive verbs are
+  tracked in #307.
 - `tools/gitlab/` (`magpie-gitlab`) — partial, read-only GitLab REST API v4
   bridge, declared `contract:tracker + contract:source-control +
   contract:change-request` with `**Coverage:** partial`.

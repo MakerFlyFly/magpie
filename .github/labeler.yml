@@ -459,6 +459,7 @@ contract:mail-archive:
   - any:
       - changed-files:
           - any-glob-to-any-file:
+              - 'tools/discourse/**'
               - 'tools/gmail/**'
               - 'tools/mail-archive/**'
               - 'tools/ponymail/**'
