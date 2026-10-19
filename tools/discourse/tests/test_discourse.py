@@ -21,6 +21,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -51,7 +52,7 @@ class FakeForum:
         self.routes = routes
         self.requests: list[urllib.request.Request] = []
 
-    def __call__(self, request: urllib.request.Request, timeout: float) -> FakeResponse:
+    def __call__(self, request: urllib.request.Request, timeout: float, *, base_url: str) -> FakeResponse:
         self.requests.append(request)
         path = urllib.parse.urlparse(request.full_url).path
         reply = self.routes[path]
@@ -309,7 +310,9 @@ def test_get_json_reports_rate_limiting(monkeypatch: pytest.MonkeyPatch, config:
 
 
 def test_get_json_rejects_non_json(monkeypatch: pytest.MonkeyPatch, config: DiscourseConfig) -> None:
-    monkeypatch.setattr(client, "_urlopen", lambda request, timeout: FakeResponse(b"<html>login</html>"))
+    monkeypatch.setattr(
+        client, "_urlopen", lambda request, timeout, *, base_url: FakeResponse(b"<html>login</html>")
+    )
     with pytest.raises(DiscourseError, match="not JSON"):
         client.get_json(config, "/t/42.json")
 
@@ -320,7 +323,7 @@ def _redirect(handler: SameOriginRedirectHandler, url: str, target: str) -> urll
 
 
 def test_same_origin_redirect_keeps_the_headers() -> None:
-    followed = _redirect(SameOriginRedirectHandler(), f"{BASE}/t/42.json", "/t/slug/42.json")
+    followed = _redirect(SameOriginRedirectHandler(BASE), f"{BASE}/t/42.json", "/t/slug/42.json")
     assert followed is not None
     assert followed.full_url == f"{BASE}/t/slug/42.json"
     assert followed.get_header("Api-key") == "secret"
@@ -331,7 +334,7 @@ def test_same_origin_redirect_keeps_the_headers() -> None:
 )
 def test_cross_origin_redirect_is_refused(target: str) -> None:
     with pytest.raises(DiscourseError, match="refusing to forward credentials"):
-        _redirect(SameOriginRedirectHandler(), f"{BASE}/t/42.json", target)
+        _redirect(SameOriginRedirectHandler(BASE), f"{BASE}/t/42.json", target)
 
 
 # --- CLI --------------------------------------------------------------------
@@ -499,7 +502,7 @@ def test_http_errors_do_not_print_success_or_retry(
 @pytest.mark.parametrize("target", [f"{BASE}:bad/t/42.json", "https://[broken"])
 def test_invalid_redirect_urls_use_bridge_errors(target: str) -> None:
     with pytest.raises(DiscourseError):
-        _redirect(SameOriginRedirectHandler(), f"{BASE}/t/42.json", target)
+        _redirect(SameOriginRedirectHandler(BASE), f"{BASE}/t/42.json", target)
 
 
 def test_usage_errors_keep_argparse_exit_code(forum_env: None, capsys: pytest.CaptureFixture[str]) -> None:
@@ -571,9 +574,217 @@ def test_interrupted_http_error_body_keeps_the_http_status(
 @pytest.mark.parametrize("headers", [{}, {"Api-Key": "test-key", "Api-Username": "reader"}])
 def test_equivalent_origins_preserve_read_headers(headers: dict[str, str]) -> None:
     request = urllib.request.Request(f"{BASE}/t/42.json", headers=headers)
-    followed = SameOriginRedirectHandler().redirect_request(
+    followed = SameOriginRedirectHandler(BASE).redirect_request(
         request, None, 302, "Moved", Message(), f"{BASE}:443/t/slug/42.json"
     )
     assert followed is not None
     assert followed.get_method() == "GET"
     assert dict(followed.header_items()) == dict(request.header_items())
+
+
+# --- input and transport boundaries -----------------------------------------
+
+
+@pytest.mark.parametrize("variable", ["DISCOURSE_API_KEY", "DISCOURSE_API_USERNAME"])
+def test_cli_rejects_unencodable_headers_without_leaking_values_or_requesting(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    variable: str,
+) -> None:
+    monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
+    monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
+    monkeypatch.setenv(variable, "private-\u5f20\u4e09")
+    forum = _serve(monkeypatch, {"/t/42.json": _topic([_post(100, 1)], [100])})
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert variable in output.err
+    assert "latin-1" in output.err
+    assert "private-" not in output.err
+    assert "Traceback" not in output.err
+    assert forum.requests == []
+
+
+def test_cli_preserves_latin1_credentials(monkeypatch: pytest.MonkeyPatch, forum_env: None) -> None:
+    monkeypatch.setenv("DISCOURSE_API_KEY", "cl\u00e9")
+    monkeypatch.setenv("DISCOURSE_API_USERNAME", "Andr\u00e9")
+    forum = _serve(monkeypatch, {"/t/42.json": _topic([], [])})
+    assert package_main(["topic", "view", "42"]) == 0
+    assert forum.requests[0].get_header("Api-key") == "cl\u00e9"
+    assert forum.requests[0].get_header("Api-username") == "Andr\u00e9"
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "cp936"])
+def test_cli_json_round_trips_unicode_on_legacy_stdout(
+    monkeypatch: pytest.MonkeyPatch, forum_env: None, encoding: str
+) -> None:
+    title = "\u4e2d\u6587 \U0001f44d"
+    post = {**_post(100, 1, "\u5f20\u4e09"), "cooked": f"<p>{title}</p>"}
+    _serve(monkeypatch, {"/t/42.json": _topic([post], [100], title=title)})
+    buffer = io.BytesIO()
+    with (
+        monkeypatch.context() as patched,
+        io.TextIOWrapper(buffer, encoding=encoding, errors="strict") as stdout,
+    ):
+        patched.setattr(sys, "stdout", stdout)
+        assert package_main(["topic", "view", "42"]) == 0
+        stdout.flush()
+        encoded = buffer.getvalue()
+    assert encoded.isascii()
+    result = json.loads(encoded.decode(encoding))
+    assert result["subject"] == title
+    assert result["messages"][0]["body"] == post["cooked"]
+    assert result["messages"][0]["from"] == "@\u5f20\u4e09"
+
+
+@pytest.mark.parametrize("suffix", ["?", "#", "?#", "?x=1", "#fragment"])
+def test_cli_rejects_base_url_markers_before_requesting(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    suffix: str,
+) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", f"{BASE}/forum{suffix}")
+    forum = _serve(monkeypatch, {"/forum/t/42.json": _topic([], [])})
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "DISCOURSE_URL" in output.err
+    assert forum.requests == []
+
+
+def test_share_url_markers_and_escaped_base_path_are_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", f"{BASE}/forum%3F%23")
+    sub = load_config()
+    assert topics.parse_topic_ref(f"{sub.base_url}/t/proposal/42?u=alice#post-2", sub) == 42
+
+
+@pytest.mark.parametrize("limit", ["1", "500"])
+def test_cli_reports_real_mega_topics_as_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    limit: str,
+) -> None:
+    mega = _topic(
+        [],
+        [],
+        posts_count=12000,
+        post_stream={"posts": [_post(100, 1)], "isMegaTopic": True, "lastId": 12100},
+    )
+    forum = _serve(monkeypatch, {"/t/42.json": mega})
+    assert package_main(["topic", "view", "42", "--max-posts", limit]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "mega topics without a post ID stream are not supported" in output.err
+    assert len(forum.requests) == 1
+
+
+def test_a_large_count_does_not_replace_stream_validation(
+    monkeypatch: pytest.MonkeyPatch, config: DiscourseConfig
+) -> None:
+    _serve(monkeypatch, {"/t/42.json": _topic([_post(100, 1)], [100], posts_count=12000)})
+    assert topics.fetch_topic(config, 42)["truncated"] is False
+
+
+def test_moved_posts_keep_forum_stream_order_instead_of_date_order(
+    monkeypatch: pytest.MonkeyPatch, config: DiscourseConfig
+) -> None:
+    recent = {**_post(100, 1), "created_at": "2026-10-05T10:00:00.000Z"}
+    moved = {**_post(101, 3), "created_at": "2026-09-01T10:00:00.000Z"}
+    _serve(monkeypatch, {"/t/42.json": _topic([moved, recent], [100, 101])})
+    messages = topics.fetch_topic(config, 42)["messages"]
+    assert [post["message_id"] for post in messages] == ["100", "101"]
+    assert [post["date"] for post in messages] == [recent["created_at"], moved["created_at"]]
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_get_redirects_stay_in_the_configured_subpath(code: int) -> None:
+    request = urllib.request.Request(f"{BASE}/forum/t/42.json", headers={"Api-Key": "secret"})
+    followed = SameOriginRedirectHandler(f"{BASE}/forum").redirect_request(
+        request, None, code, "Moved", Message(), f"{BASE}:443/forum/t/slug/42.json?u=reader"
+    )
+    assert followed is not None
+    assert followed.get_method() == "GET"
+    assert followed.get_header("Api-key") == "secret"
+    assert followed.full_url == f"{BASE}:443/forum/t/slug/42.json?u=reader"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/other-app/collect",
+        "/forum-other/collect",
+        "/forum/%2e%2e/collect",
+        "/forum/%252e%252e/collect",
+        "/forum/a/%2e/collect",
+        "/forum/a%2f..%2fcollect",
+        "/forum/%5c..%5ccollect",
+        "/forum/\\collect",
+        "/forum/%0acollect",
+        "/forum/%zz/collect",
+    ],
+)
+def test_redirects_reject_paths_that_leave_or_obscure_the_forum_namespace(path: str) -> None:
+    with pytest.raises(DiscourseError):
+        _redirect(SameOriginRedirectHandler(f"{BASE}/forum"), f"{BASE}/forum/t/42.json", f"{BASE}{path}")
+
+
+@pytest.mark.parametrize("method", ["POST", "HEAD"])
+def test_non_get_redirects_are_refused(method: str) -> None:
+    request = urllib.request.Request(f"{BASE}/forum/t/42.json", method=method, data=b"body")
+    with pytest.raises(DiscourseError, match="Only GET"):
+        SameOriginRedirectHandler(f"{BASE}/forum").redirect_request(
+            request, None, 302, "Moved", Message(), "/forum/t/slug/42.json"
+        )
+
+
+@pytest.mark.parametrize(
+    ("url", "method"),
+    [
+        (f"{BASE}/other-app/collect", "GET"),
+        (f"{BASE}/forum-other/collect", "GET"),
+        (f"{BASE}/forum/%2e%2e/collect", "GET"),
+        ("https://evil.example.test/forum/t/42.json", "GET"),
+        (f"{BASE}/forum/t/42.json", "POST"),
+    ],
+)
+def test_transport_checks_the_initial_request_before_opening(
+    monkeypatch: pytest.MonkeyPatch, url: str, method: str
+) -> None:
+    def unexpected_open(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("An out-of-scope request reached the opener")
+
+    monkeypatch.setattr(urllib.request, "build_opener", unexpected_open)
+    with pytest.raises(DiscourseError):
+        client._urlopen(urllib.request.Request(url, method=method), 30, base_url=f"{BASE}/forum")
+
+
+def test_cli_transport_binds_redirects_to_the_configured_forum(
+    monkeypatch: pytest.MonkeyPatch, forum_env: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", f"{BASE}/forum")
+    monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
+    monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
+    requests: list[urllib.request.Request] = []
+
+    class RedirectingOpener:
+        def __init__(self, handler: SameOriginRedirectHandler) -> None:
+            self.handler = handler
+
+        def open(self, request: urllib.request.Request, timeout: float) -> FakeResponse:
+            requests.append(request)
+            self.handler.redirect_request(request, None, 302, "Moved", Message(), "/other-app/collect")
+            pytest.fail("The transport followed an out-of-scope redirect")
+
+    def build_opener(handler: SameOriginRedirectHandler) -> RedirectingOpener:
+        assert isinstance(handler, SameOriginRedirectHandler)
+        return RedirectingOpener(handler)
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "refusing to forward credentials" in output.err
+    assert len(requests) == 1

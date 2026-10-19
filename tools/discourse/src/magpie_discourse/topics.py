@@ -69,6 +69,8 @@ def fetch_topic(config: DiscourseConfig, topic_id: int, max_posts: int = DEFAULT
         raise DiscourseError("Discourse returned an invalid topic id or title")
     initial_posts = _read_posts(raw)
     post_ids = raw["post_stream"].get("stream")
+    if post_ids is None and raw["post_stream"].get("isMegaTopic") is True:
+        raise DiscourseError("Discourse mega topics without a post ID stream are not supported")
     if not isinstance(post_ids, list) or any(not _positive_int(post_id) for post_id in post_ids):
         raise DiscourseError("Discourse returned an invalid or missing topic post stream")
     if not post_ids and (initial_posts or raw.get("posts_count")):

@@ -41,7 +41,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:  # pragma: no cover - argparse rejects anything else
         raise AssertionError(f"unhandled command {args}")
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=True))
     return 0
 
 

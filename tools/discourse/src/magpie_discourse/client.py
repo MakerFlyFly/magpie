@@ -23,6 +23,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,12 +41,29 @@ class DiscourseError(Exception):
 
 
 class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Follow redirects only when they stay on the forum's HTTPS origin.
+    """Keep read requests within the configured forum's origin and path."""
 
-    Discourse redirects some topic URLs to their canonical slug form; a
-    redirect to any other origin is refused so the API key is never sent
-    to a host the adopter did not configure.
-    """
+    def __init__(self, base_url: str) -> None:
+        self._origin = origin(parse_url(base_url))
+        self._path = _checked_path(base_url).rstrip("/")
+
+    def check_request(self, request: urllib.request.Request) -> None:
+        """Reject writes and requests outside the configured forum before sending."""
+        if request.get_method() != "GET":
+            raise DiscourseError("Only GET requests are supported by the read-only Discourse bridge")
+        self._check_url(request.full_url)
+
+    def _check_url(self, url: str) -> None:
+        destination = parse_url(url)
+        path = _checked_path(url)
+        if (
+            origin(destination) != self._origin
+            or destination.username is not None
+            or (self._path and path != self._path and not path.startswith(f"{self._path}/"))
+        ):
+            raise DiscourseError(
+                "Discourse request is outside the configured forum; refusing to forward credentials"
+            )
 
     def redirect_request(
         self,
@@ -56,14 +74,15 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Any,
         newurl: str,
     ) -> urllib.request.Request | None:
+        self.check_request(req)
+        # Check before urljoin/urlparse can normalise away unsafe path characters.
+        _checked_path(newurl)
         try:
             target = urllib.parse.urljoin(req.full_url, newurl)
-            destination = parse_url(target)
-        except (ValueError, DiscourseError) as exc:
+        except ValueError as exc:
             raise DiscourseError("Invalid Discourse redirect URL; refusing to forward credentials") from exc
-        if origin(destination) != origin(parse_url(req.full_url)) or destination.username is not None:
-            raise DiscourseError(f"Discourse request redirected to {target}; refusing to forward credentials")
-        return urllib.request.Request(target, headers=dict(req.header_items()), method=req.get_method())
+        self._check_url(target)
+        return super().redirect_request(req, fp, code, msg, headers, target)
 
 
 def origin(parsed: urllib.parse.ParseResult) -> tuple[str, str | None, int | None]:
@@ -80,6 +99,29 @@ def parse_url(value: str) -> urllib.parse.ParseResult:
     except ValueError as exc:
         raise DiscourseError("Invalid Discourse URL: check its host and port") from exc
     return parsed
+
+
+def _checked_path(url: str) -> str:
+    """Decode a path for boundary checks, rejecting ambiguous traversal forms."""
+    message = "Invalid Discourse URL path; refusing to forward credentials"
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        raise DiscourseError(message)
+    path = parse_url(url).path
+    while True:
+        if (
+            "\\" in path
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or any(segment in (".", "..") for segment in path.split("/"))
+            or re.search(r"%(?![0-9a-fA-F]{2})", path)
+        ):
+            raise DiscourseError(message)
+        try:
+            decoded = urllib.parse.unquote(path, errors="strict")
+        except UnicodeDecodeError as exc:
+            raise DiscourseError(message) from exc
+        if decoded == path:
+            return path
+        path = decoded
 
 
 @dataclass(frozen=True)
@@ -99,7 +141,7 @@ def load_config() -> DiscourseConfig:
     parsed = parse_url(raw_url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise DiscourseError("DISCOURSE_URL must be an https:// URL")
-    if parsed.query or parsed.fragment or parsed.username or parsed.password:
+    if "?" in raw_url or "#" in raw_url or parsed.username is not None:
         raise DiscourseError("DISCOURSE_URL must not carry credentials, a query or a fragment")
 
     api_key = os.environ.get("DISCOURSE_API_KEY", "").strip() or None
@@ -108,6 +150,12 @@ def load_config() -> DiscourseConfig:
         raise DiscourseError("DISCOURSE_API_USERNAME is required when DISCOURSE_API_KEY is set")
     if any("\r" in value or "\n" in value for value in (api_key or "", api_username or "")):
         raise DiscourseError("Discourse API credentials must not contain newlines")
+    for variable, value in (("DISCOURSE_API_KEY", api_key), ("DISCOURSE_API_USERNAME", api_username)):
+        if value is not None:
+            try:
+                value.encode("latin-1")
+            except UnicodeEncodeError as exc:
+                raise DiscourseError(f"{variable} must be encodable as a latin-1 HTTP header") from exc
 
     return DiscourseConfig(base_url=raw_url.rstrip("/"), api_key=api_key, api_username=api_username)
 
@@ -127,9 +175,11 @@ def api_url(config: DiscourseConfig, path: str, params: Mapping[str, QueryValue]
     return url
 
 
-def _urlopen(request: urllib.request.Request, timeout: float) -> Any:
-    """Open a request with the same-origin redirect policy (patched in tests)."""
-    opener = urllib.request.build_opener(SameOriginRedirectHandler)
+def _urlopen(request: urllib.request.Request, timeout: float, *, base_url: str) -> Any:
+    """Open a GET with the configured forum boundary (patched in tests)."""
+    handler = SameOriginRedirectHandler(base_url)
+    handler.check_request(request)
+    opener = urllib.request.build_opener(handler)
     return opener.open(request, timeout=timeout)
 
 
@@ -144,7 +194,7 @@ def get_json(
         method="GET",
     )
     try:
-        with _urlopen(request, DEFAULT_TIMEOUT_SECONDS) as response:
+        with _urlopen(request, DEFAULT_TIMEOUT_SECONDS, base_url=config.base_url) as response:
             parsed = json.loads(response.read().decode("utf-8"))
     except DiscourseError:
         raise
