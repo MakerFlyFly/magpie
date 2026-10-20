@@ -98,6 +98,9 @@ Unsupported credentials and invalid base paths fail during configuration
 validation, before a request, without including credential values in the error.
 Topic share URLs may include query parameters or fragments.
 Topic ids and `--max-posts` must be positive integers.
+Use percent-encoded non-ASCII characters and spaces in the configured base path
+(`/%E8%AE%BA%E5%9D%9B`, `/my%20forum`); raw Unicode or spaces in that path are refused.
+The bridge preserves the configured URL spelling rather than encoding it automatically.
 
 ## Output contract
 
@@ -110,19 +113,32 @@ metadata; this partial bridge does not yet fulfil the complete archive contract:
 | `list` | The forum base URL (Discourse has no list address). |
 | `subject` | The topic title. |
 | `url` | The canonical topic URL. |
-| `messages[]` | One record per post, in API `post_stream.stream` order (not necessarily chronological): `message_id` (post id), `post_number`, `from` (`@username`), `date`, `updated_at`, `body` (the post's rendered HTML, `body_format: "html"`), `in_reply_to` (the replied-to post's id, when it was read), `url`, `post_type`, `hidden`, `deleted`. |
+| `messages[]` | One record per post, in API `post_stream.stream` order (not necessarily chronological): `message_id` (post id), `post_number`, `from` (`@username`), `date`, `updated_at`, `body` (the post's rendered HTML, `body_format: "html"`), `body_hidden` (the server's body-replacement marker), `in_reply_to` (the replied-to post's id, when it was read), `url`, `post_type`, `hidden`, `deleted`. |
 | `participant_handles[]` | Distinct posters in the returned messages as `@username`, in order of first post. |
 | `category_id`, `tags[]`, `created_at`, `last_posted_at`, `posts_count`, `closed`, `archived` | Topic metadata. |
 | `truncated` | `true` when the topic has more posts than `--max-posts` (default 500); only the first posts are returned. |
 
+Every response post must include a string `cooked` body, including posts beyond
+the output limit; a missing or null body is an error rather than an empty post.
+An empty string means the API explicitly supplied an empty string; it does not
+establish that the underlying original text was empty.
+Bodies are returned unchanged, including whitespace and hidden-post placeholders.
+If present, `cooked_hidden` must be boolean.
+`body_hidden: true` relays that server marker; false means the server did not
+report it, not that the body is original or the content public.
+This flag is separate from the post's `hidden` status: staff can receive a
+hidden post's content without a body-replacement marker.
+
 Discourse returns the first 20 posts with the topic; the bridge reads the rest
 of the post stream in batches of 20 through `/t/{id}/posts.json`.
 If a requested post is still missing after its batch, or a required response
-structure is malformed, the command fails instead of returning an incomplete
-thread as a successful result.
+structure is malformed, the command fails immediately, before requesting later
+batches, instead of returning an incomplete thread as a successful result.
+Duplicate IDs in the topic stream are response errors, not silently removed.
 `truncated` only describes the post limit; it never hides a failed fetch.
 Concurrent post deletion or an HTTP 429 during a batch can therefore fail the
 whole read; the bridge does not retry or return partial results.
+`--max-posts` limits post count, not response bytes or the command's total duration.
 
 Discourse mega topics that omit the ordinary post ID stream and instead return
 `post_stream.isMegaTopic: true` and `lastId` are not supported.

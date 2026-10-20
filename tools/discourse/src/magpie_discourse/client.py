@@ -157,8 +157,11 @@ def load_config() -> DiscourseConfig:
         _checked_path(base_url)
     except DiscourseError as exc:
         raise DiscourseError(path_error) from exc
-    if ";" in urllib.parse.urlsplit(base_url).path.rsplit("/", 1)[-1]:
+    base_path = urllib.parse.urlsplit(base_url).path
+    if ";" in base_path.rsplit("/", 1)[-1]:
         raise DiscourseError(path_error)
+    if not base_path.isascii() or " " in base_path:
+        raise DiscourseError(f"{path_error}; use percent-encoded non-ASCII characters and spaces")
 
     api_key = os.environ.get("DISCOURSE_API_KEY", "").strip() or None
     api_username = os.environ.get("DISCOURSE_API_USERNAME", "").strip() or None

@@ -206,6 +206,7 @@ def test_fetch_topic_maps_onto_thread_data(monkeypatch: pytest.MonkeyPatch, conf
         "date": "2026-10-02T10:00:00.000Z",
         "updated_at": "2026-10-02T11:00:00.000Z",
         "body": "<p>post 2</p>",
+        "body_hidden": False,
         "body_format": "html",
         "in_reply_to": "100",
         "url": f"{BASE}/t/proposal-drop-python-3-10/42/2",
@@ -975,3 +976,216 @@ def test_transport_rejects_raw_path_aliases_before_opening(
     request = urllib.request.Request(f"{BASE}{path}")
     with pytest.raises(DiscourseError):
         client._urlopen(request, 30, base_url=f"{BASE}/forum")
+
+
+def _serve_post_variant(
+    monkeypatch: pytest.MonkeyPatch, stage: str, post: dict[str, Any]
+) -> tuple[FakeForum, int]:
+    """Place a post in either response, optionally outside the output limit."""
+    routes: dict[str, Any]
+    if stage == "initial":
+        routes = {"/t/42.json": _topic([post], [101])}
+        limit = 500
+    elif stage == "batch":
+        routes = {
+            "/t/42.json": _topic([_post(100, 1)], [100, 101]),
+            "/t/42/posts.json": {"post_stream": {"posts": [post]}},
+        }
+        limit = 500
+    elif stage == "initial_outside_limit":
+        routes = {"/t/42.json": _topic([_post(100, 1), post], [100, 101])}
+        limit = 1
+    else:
+        assert stage == "batch_extra"
+        extra = {**post, "id": 102, "post_number": 3}
+        routes = {
+            "/t/42.json": _topic([_post(100, 1)], [100, 101, 102]),
+            "/t/42/posts.json": {"post_stream": {"posts": [_post(101, 2), extra]}},
+        }
+        limit = 2
+    return _serve(monkeypatch, routes), limit
+
+
+@pytest.mark.parametrize("stage", ["initial", "batch", "initial_outside_limit", "batch_extra"])
+@pytest.mark.parametrize("state", ["missing", "null"])
+def test_cli_requires_bodies_on_all_response_posts(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+    state: str,
+) -> None:
+    post = _post(101, 2)
+    if state == "missing":
+        post.pop("cooked")
+    else:
+        post["cooked"] = None
+    forum, limit = _serve_post_variant(monkeypatch, stage, post)
+    assert package_main(["topic", "view", "42", "--max-posts", str(limit)]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "cooked" in output.err
+    assert "Traceback" not in output.err
+    assert len(forum.requests) == (2 if stage in ("batch", "batch_extra") else 1)
+
+
+@pytest.mark.parametrize("stage", ["initial", "batch"])
+@pytest.mark.parametrize("body", [False, 123, [], {}])
+def test_cli_rejects_non_string_post_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+    body: Any,
+) -> None:
+    forum, limit = _serve_post_variant(monkeypatch, stage, {**_post(101, 2), "cooked": body})
+    assert package_main(["topic", "view", "42", "--max-posts", str(limit)]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "cooked" in output.err
+    assert "Traceback" not in output.err
+    assert len(forum.requests) == (2 if stage == "batch" else 1)
+
+
+@pytest.mark.parametrize("stage", ["initial", "batch"])
+@pytest.mark.parametrize(
+    ("body", "hidden", "marker", "expected"),
+    [
+        ("", False, "absent", False),
+        (" \n", False, False, False),
+        ("<p></p>", False, False, False),
+        ("<p>\u4e2d\u6587 \U0001f44d</p>", False, False, False),
+        ("<p>Hidden placeholder</p>", True, True, True),
+        ("<p>Staff-visible content</p>", True, "absent", False),
+        ("<p>Staff-visible content</p>", True, False, False),
+        ("", True, True, True),
+    ],
+)
+def test_cli_preserves_provided_bodies_and_reports_the_server_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+    body: str,
+    hidden: bool,
+    marker: bool | str,
+    expected: bool,
+) -> None:
+    post = {**_post(101, 2), "cooked": body, "hidden": hidden}
+    if marker != "absent":
+        post["cooked_hidden"] = marker
+    _, limit = _serve_post_variant(monkeypatch, stage, post)
+    assert package_main(["topic", "view", "42", "--max-posts", str(limit)]) == 0
+    output = capsys.readouterr()
+    message = json.loads(output.out)["messages"][-1]
+    assert output.err == ""
+    assert message["body"] == body
+    assert message["body_format"] == "html"
+    assert message["body_hidden"] is expected
+    assert message["hidden"] is hidden
+
+
+@pytest.mark.parametrize("stage", ["initial", "batch", "initial_outside_limit", "batch_extra"])
+@pytest.mark.parametrize("marker", [None, 0, "true"])
+def test_cli_requires_boolean_body_markers_on_all_response_posts(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+    marker: Any,
+) -> None:
+    post = {**_post(101, 2), "cooked": "<p>private-body-marker</p>", "cooked_hidden": marker}
+    _, limit = _serve_post_variant(monkeypatch, stage, post)
+    assert package_main(["topic", "view", "42", "--max-posts", str(limit)]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "cooked_hidden" in output.err
+    assert "private-body-marker" not in output.err
+    assert "Traceback" not in output.err
+
+
+@pytest.mark.parametrize(("drop", "expected_requests"), [(None, 25), (21, 2), (490, 25)])
+def test_multi_batch_reads_stop_at_the_first_incomplete_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    drop: int | None,
+    expected_requests: int,
+) -> None:
+    stream = list(range(1, 501))
+
+    def more(request: urllib.request.Request) -> dict[str, Any]:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+        ids = [int(value) for value in query["post_ids[]"]]
+        assert len(ids) <= 20
+        return {"post_stream": {"posts": [_post(post_id, post_id) for post_id in ids if post_id != drop]}}
+
+    forum = _serve(
+        monkeypatch,
+        {
+            "/t/42.json": _topic([_post(i, i) for i in stream[:20]], stream),
+            "/t/42/posts.json": more,
+        },
+    )
+    assert package_main(["topic", "view", "42"]) == (0 if drop is None else 1)
+    output = capsys.readouterr()
+    if drop is None:
+        thread = json.loads(output.out)
+        assert len(thread["messages"]) == 500
+        assert thread["truncated"] is False
+        assert output.err == ""
+    else:
+        assert output.out == ""
+        assert "did not return 1 requested post(s)" in output.err
+    assert len(forum.requests) == expected_requests
+
+
+@pytest.mark.parametrize(("stream", "limit"), [([100, 100, 101], "2"), ([100, 101, 100], "1")])
+def test_duplicate_stream_ids_fail_even_beyond_the_output_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    stream: list[int],
+    limit: str,
+) -> None:
+    forum = _serve(monkeypatch, {"/t/42.json": _topic([_post(100, 1), _post(101, 2)], stream)})
+    assert package_main(["topic", "view", "42", "--max-posts", limit]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "duplicate post ids" in output.err
+    assert len(forum.requests) == 1
+
+
+@pytest.mark.parametrize("path", ["/\u8bba\u575b", "/my forum"])
+def test_raw_base_paths_fail_before_requesting(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    path: str,
+) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", f"{BASE}{path}")
+    forum = _serve(monkeypatch, {f"{path}/t/42.json": _topic([], [])})
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "DISCOURSE_URL" in output.err
+    assert "percent-encoded" in output.err
+    assert "Traceback" not in output.err
+    assert forum.requests == []
+
+
+@pytest.mark.parametrize("path", ["/%E8%AE%BA%E5%9D%9B", "/my%20forum", "/a;b/forum"])
+def test_encoded_base_paths_keep_their_original_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    path: str,
+) -> None:
+    url = f"{BASE}{path}"
+    monkeypatch.setenv("DISCOURSE_URL", url)
+    forum = _serve(monkeypatch, {f"{path}/t/42.json": _topic([_post(100, 1)], [100])})
+    assert package_main(["topic", "view", "42"]) == 0
+    thread = json.loads(capsys.readouterr().out)
+    assert thread["list"] == url
+    assert forum.requests[0].full_url == f"{url}/t/42.json"
+    assert forum.requests[0].full_url.isascii()

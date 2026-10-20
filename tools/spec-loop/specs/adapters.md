@@ -156,23 +156,6 @@ by swapping the adapter, not the skill.
   backend yet; deeper Jira handoff, Data Center
   review/merge writes, broader repository permissions, and fuller Pipelines
   run/log/retry coverage remain tracked in #606.
-- `tools/discourse/` (`magpie-discourse`) — partial, read-only Discourse
-  forum bridge, declared `contract:mail-archive` with `**Coverage:** partial`.
-  `topic view <id|url>` reads one topic and its post stream (in batches of
-  20, capped by `--max-posts` with a `truncated` flag) and prints it in the
-  mail-archive `thread_data` field shape, preserving forum stream order
-  rather than promising chronological contract order.
-  Public forums are read anonymously; the output does not classify visibility,
-  so callers must establish privacy approval before sending content to a model.
-  Missing requested posts, malformed responses and mega topics without an
-  ordinary ID stream fail explicitly rather than returning a successful
-  incomplete thread; there are no automatic retries or partial results.
-  Coverage is not complete or selectable as an archive backend yet.
-  `DISCOURSE_API_KEY` + `DISCOURSE_API_USERNAME` cover authorised private reads
-  and are only sent within the `DISCOURSE_URL` origin and configured path.
-  Only GET requests are permitted. Topic list, search,
-  user activity, guarded writes and the remaining mail-archive verbs are
-  tracked in #307.
 - `tools/gitlab/` (`magpie-gitlab`) — partial, read-only GitLab REST API v4
   bridge, declared `contract:tracker + contract:source-control +
   contract:change-request` with `**Coverage:** partial`.
@@ -189,6 +172,27 @@ by swapping the adapter, not the skill.
   note the cap on stderr; `--limit` rejects values below 1.
   No write or mutation operations exist.
   Offline tests mock every HTTP response.
+- `tools/discourse/` (`magpie-discourse`) — partial, read-only Discourse
+  forum bridge, declared `contract:mail-archive` with `**Coverage:** partial`.
+  `topic view <id|url>` reads one topic and its post stream (in batches of
+  20, capped by `--max-posts` with a `truncated` flag) and prints it in the
+  mail-archive `thread_data` field shape, preserving forum stream order
+  rather than promising chronological contract order.
+  Every response post requires a string `cooked` body (empty strings are valid);
+  `body_hidden` relays the server's `cooked_hidden` replacement marker without
+  inferring visibility or proving that an unmarked body is original.
+  Public forums are read anonymously; the output does not classify visibility,
+  so callers must establish privacy approval before sending content to a model.
+  Missing requested posts, malformed responses and mega topics without an
+  ordinary ID stream fail explicitly rather than returning a successful
+  incomplete thread; there are no automatic retries or partial results.
+  An incomplete batch stops the read before any later batch is requested.
+  Coverage is not complete or selectable as an archive backend yet.
+  `DISCOURSE_API_KEY` + `DISCOURSE_API_USERNAME` cover authorised private reads
+  and are only sent within the `DISCOURSE_URL` origin and configured path.
+  Only GET requests are permitted. Topic list, search,
+  user activity, guarded writes and the remaining mail-archive verbs are
+  tracked in #307.
 - `tools/forgejo/` — doc-only Forgejo / Gitea adapter (#1469, part of
   #310), declared `contract:tracker + contract:source-control +
   contract:change-request` with `**Coverage:** partial`.

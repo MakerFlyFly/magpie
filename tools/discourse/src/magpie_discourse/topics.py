@@ -73,6 +73,8 @@ def fetch_topic(config: DiscourseConfig, topic_id: int, max_posts: int = DEFAULT
         raise DiscourseError("Discourse mega topics without a post ID stream are not supported")
     if not isinstance(post_ids, list) or any(not _positive_int(post_id) for post_id in post_ids):
         raise DiscourseError("Discourse returned an invalid or missing topic post stream")
+    if len(set(post_ids)) != len(post_ids):
+        raise DiscourseError("Discourse returned duplicate post ids in the topic stream")
     if not post_ids and (initial_posts or raw.get("posts_count")):
         raise DiscourseError("Discourse returned an empty stream for a non-empty topic")
     if raw.get("tags") is not None and not isinstance(raw["tags"], list):
@@ -86,12 +88,11 @@ def fetch_topic(config: DiscourseConfig, topic_id: int, max_posts: int = DEFAULT
         extra = get_json(config, f"/t/{topic_id}/posts.json", {"post_ids[]": chunk})
         for post in _read_posts(extra):
             posts[post["id"]] = post
-
-    missing = [post_id for post_id in wanted if post_id not in posts]
-    if missing:
-        raise DiscourseError(
-            f"Discourse did not return {len(missing)} requested post(s) for topic {topic_id}"
-        )
+        absent = [post_id for post_id in chunk if post_id not in posts]
+        if absent:
+            raise DiscourseError(
+                f"Discourse did not return {len(absent)} requested post(s) for topic {topic_id}"
+            )
     ordered = [posts[post_id] for post_id in wanted]
     return normalize_topic(raw, ordered, config, truncated=len(post_ids) > len(wanted))
 
@@ -99,7 +100,7 @@ def fetch_topic(config: DiscourseConfig, topic_id: int, max_posts: int = DEFAULT
 def normalize_topic(
     raw: dict[str, Any], posts: list[dict[str, Any]], config: DiscourseConfig, *, truncated: bool
 ) -> dict[str, Any]:
-    """Map a Discourse topic payload onto the mail-archive ``thread_data`` shape."""
+    """Map validated posts onto the mail-archive ``thread_data`` field shape."""
     topic_id = raw.get("id")
     slug = raw.get("slug") or "-"
     url = f"{config.base_url}/t/{slug}/{topic_id}"
@@ -107,10 +108,12 @@ def normalize_topic(
 
     messages = []
     handles: list[str] = []
+    seen_handles: set[str] = set()
     for post in posts:
         username = post.get("username")
         handle = f"@{username}" if username else None
-        if handle and handle not in handles:
+        if handle and handle not in seen_handles:
+            seen_handles.add(handle)
             handles.append(handle)
         reply_to = post.get("reply_to_post_number")
         messages.append(
@@ -120,7 +123,8 @@ def normalize_topic(
                 "from": handle,
                 "date": post.get("created_at"),
                 "updated_at": post.get("updated_at"),
-                "body": post.get("cooked") or "",
+                "body": post["cooked"],
+                "body_hidden": post.get("cooked_hidden") is True,
                 "body_format": "html",
                 "in_reply_to": str(id_by_number[reply_to]) if id_by_number.get(reply_to) else None,
                 "url": f"{url}/{post.get('post_number')}",
@@ -172,7 +176,6 @@ def _read_posts(payload: dict[str, Any]) -> list[dict[str, Any]]:
             or not _positive_int(post.get("id"))
             or not _positive_int(post.get("post_number"))
             or not isinstance(post.get("created_at"), str)
-            or not isinstance(post.get("cooked", ""), str | type(None))
             or not isinstance(post.get("username"), str | type(None))
             or (
                 post.get("reply_to_post_number") is not None
@@ -180,5 +183,9 @@ def _read_posts(payload: dict[str, Any]) -> list[dict[str, Any]]:
             )
         ):
             raise DiscourseError("Discourse returned an invalid post record")
+        if not isinstance(post.get("cooked"), str):
+            raise DiscourseError(f"Discourse returned a missing or invalid cooked body for post {post['id']}")
+        if not isinstance(post.get("cooked_hidden", False), bool):
+            raise DiscourseError(f"Discourse returned an invalid cooked_hidden flag for post {post['id']}")
         posts.append(post)
     return posts
