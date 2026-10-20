@@ -212,7 +212,7 @@ contract for one vendor:
 | Capability contract | Reference adapter(s) | Other backends (extension points) |
 |---|---|---|
 | [`tools/cve-tool`](../tools/cve-tool/) | [`tools/cve-tool-vulnogram`](../tools/cve-tool-vulnogram/) (ASF) | MITRE form, CVE.org direct, GHSA |
-| [`tools/mail-archive`](../tools/mail-archive/) | [`tools/ponymail`](../tools/ponymail/) (ASF) | Hyperkitty, Discourse, Google Groups, GitHub Discussions |
+| [`tools/mail-archive`](../tools/mail-archive/) | [`tools/ponymail`](../tools/ponymail/) (ASF), [`tools/discourse`](../tools/discourse/) (`partial`, not a complete/selectable backend) | Hyperkitty, remaining Discourse coverage [#307](https://github.com/apache/magpie/issues/307), Google Groups, GitHub Discussions |
 | [`tools/mail-source`](../tools/mail-source/) | mbox, IMAP, Gmail API ([`tools/gmail`](../tools/gmail/)), Mailman 3 ([`tools/mail-source/mailman3`](../tools/mail-source/mailman3/)) | — |
 | [`tools/forwarder-relay`](../tools/forwarder-relay/) | ASF-security ([`tools/gmail/asf-relay.md`](../tools/gmail/asf-relay.md)) | huntr.com, HackerOne |
 | [`tools/scan-format`](../tools/scan-format/) | ASVS | other scanner formats |
@@ -520,7 +520,7 @@ coverage without pretending one team can implement an open-ended set.
 | LLM backend | ✅ by construction | Claude Code, Ollama, vLLM, Apache-hosted, Bedrock, direct Anthropic | Any endpoint meeting the capability floor + privacy gate |
 | Agentic harness | ✅ by construction (`AGENTS.md` standard) | Claude Code; OpenCode; [Codex adapter](adapters/codex.md) (experimental); [Gemini adapter](adapters/gemini.md) (experimental); community use under Cursor, Copilot, Kiro | Remaining runtime adapters [#314–#322](https://github.com/apache/magpie/issues?q=is%3Aissue+state%3Aopen+adapter+in%3Atitle) |
 | Forge / tracker | ✅ by construction | GitHub, Jira, SourceHut; Bitbucket and GitLab `partial-read-only` foundations excluded from complete-backend counts; CVE/scan/relay via adapter contracts | Forgejo/Gitea [#310](https://github.com/apache/magpie/issues/310), Pagure [#312](https://github.com/apache/magpie/issues/312), full Bitbucket tracker/change-request/Jira coverage [#606](https://github.com/apache/magpie/issues/606), GitLab [#305](https://github.com/apache/magpie/issues/305), Bugzilla [#302](https://github.com/apache/magpie/issues/302) |
-| Communication channels | ✅ by construction | PonyMail / mail-archive reads; Mailman 3 / Hyperkitty public-archive reads ([`tools/mail-source/mailman3`](../tools/mail-source/mailman3/)) | mbox [#304](https://github.com/apache/magpie/issues/304), IMAP [#303](https://github.com/apache/magpie/issues/303); Discourse [#307](https://github.com/apache/magpie/issues/307), Zulip [#308](https://github.com/apache/magpie/issues/308), Matrix [#309](https://github.com/apache/magpie/issues/309) |
+| Communication channels | ✅ by construction | PonyMail / mail-archive reads; Mailman 3 / Hyperkitty public-archive reads ([`tools/mail-source/mailman3`](../tools/mail-source/mailman3/)); Discourse topic reads ([`tools/discourse`](../tools/discourse/), `partial`) | mbox [#304](https://github.com/apache/magpie/issues/304), IMAP [#303](https://github.com/apache/magpie/issues/303); Discourse [#307](https://github.com/apache/magpie/issues/307), Zulip [#308](https://github.com/apache/magpie/issues/308), Matrix [#309](https://github.com/apache/magpie/issues/309) |
 | Source control (VCS) | ✅ by construction | **Git**, **Mercurial**, **Fossil**, **Subversion** (complete, [`tools/vcs`](../tools/vcs/)); ASF SVN surface ([`tools/asf-svn`](../tools/asf-svn/): source control + dist.apache.org + authorization) | Jujutsu [\#603](https://github.com/apache/magpie/issues/603), Perforce [\#605](https://github.com/apache/magpie/issues/605) (tracked) |
 | Project governance | ✅ by construction | ASF + non-ASF adopter profiles | Adopter config (modes, thresholds) |
 
@@ -588,7 +588,7 @@ generated block below.
 | `contract:tracker` | ✅ | vendor-backed | Atlassian, Fossil, GitHub, SourceHut | 4 backend vendors: Atlassian, Fossil, GitHub, SourceHut; partial foundation, not counted: bitbucket, forgejo, gitlab |
 | `contract:source-control` | ✅ | vendor-backed | Fossil, Git, GitHub, SourceHut, Subversion | 5 backend vendors: Fossil, Git, GitHub, SourceHut, Subversion; partial foundation, not counted: forgejo, gitlab |
 | `contract:change-request` | ✅ | vendor-backed | Atlassian, GitHub, email | 3 backend vendors: Atlassian, GitHub, email; partial foundation, not counted: bitbucket, forgejo, gitlab |
-| `contract:mail-archive` | ✅ | vendor-backed | ASF, Google, SourceHut | 3 backend vendors: ASF, Google, SourceHut |
+| `contract:mail-archive` | ✅ | vendor-backed | ASF, Google, SourceHut | 3 backend vendors: ASF, Google, SourceHut; partial foundation, not counted: discourse |
 | `contract:chat` | ✅ | vendor-backed | Discord, Slack | 2 backend vendors: Discord, Slack |
 | `contract:mail-source` | ✅ | vendor-backed | ASF, Google, Maildir | 3 backend vendors: ASF, Google, Maildir |
 | `contract:mail-create` | ✅ | vendor-backed | Google, Maildir | 2 backend vendors: Google, Maildir |
