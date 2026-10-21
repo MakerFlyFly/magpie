@@ -30,6 +30,7 @@ members = [
     "jira-bridge",
     "magpie-bitbucket",
     "magpie-dev",
+    "magpie-discourse",
     "magpie-fossil",
     "magpie-gitlab",
     "magpie-local-tracker",
@@ -967,6 +968,21 @@ requires-dist = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.16.2" },
 ]
+
+[[package]]
+name = "magpie-discourse"
+version = "0.1.0"
+source = { editable = "tools/discourse" }
+
+[package.dev-dependencies]
+dev = [
+    { name = "magpie-dev" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [{ name = "magpie-dev", editable = "tools/dev" }]
 
 [[package]]
 name = "magpie-fossil"
