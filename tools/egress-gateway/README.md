@@ -105,9 +105,10 @@ exact host. Loopback (`localhost`, `127.0.0.1`, `::1`) is always allowed.
 uv run --project tools/egress-gateway --group dev pytest
 ```
 
-The allowlist policy (`host_allowed`) is a pure function and is unit-tested
-directly; the proxy.py integration is intentionally not exercised in CI
-(it needs to bind a port).
+Tests cover the allowlist policy (`host_allowed`) and CLI startup against
+the installed proxy.py argument parser and plugin loader.
+CLI tests replace socket setup, shutdown, and the wait loop;
+live proxy integration is tested locally because it needs to bind a port.
 
 ## Caveat — host-level, not payload-level
 
