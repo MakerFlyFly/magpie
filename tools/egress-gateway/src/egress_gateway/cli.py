@@ -66,8 +66,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.log_level,
             *passthrough,
         ]
-    ) as gateway:
-        proxy.sleep_loop(gateway)
+    ):
+        proxy.sleep_loop()
     return 0
 
 

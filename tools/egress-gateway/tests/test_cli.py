@@ -19,28 +19,51 @@
 
 from __future__ import annotations
 
-import builtins
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import proxy
 import pytest
 
+import egress_gateway
 from egress_gateway import cli
-from egress_gateway.allowlist import EgressAllowlistPlugin
+from egress_gateway.allowlist import EgressAllowlistPlugin, host_allowed
+
+
+@pytest.fixture
+def isolated_proxy_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    user_proxy_dir = Path.home() / ".proxy"
+    real_makedirs = os.makedirs
+
+    def guarded_makedirs(name: str | os.PathLike[str], mode: int = 0o777, exist_ok: bool = False) -> None:
+        path = Path(name).absolute()
+        if path == user_proxy_dir or user_proxy_dir in path.parents:
+            raise AssertionError("CLI tests must not create directories in the user's .proxy directory")
+        real_makedirs(name, mode=mode, exist_ok=exist_ok)
+
+    monkeypatch.setattr(os, "makedirs", guarded_makedirs)
+    return ["--data-dir", str(tmp_path / "data"), "--cache-dir", str(tmp_path / "cache")]
 
 
 @pytest.fixture
 def lifecycle(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, proxy.Proxy]]:
     events: list[tuple[str, proxy.Proxy]] = []
+
+    def wait() -> None:
+        events.append(("wait", events[0][1]))
+
     monkeypatch.setattr(proxy.Proxy, "setup", lambda gateway: events.append(("setup", gateway)))
     monkeypatch.setattr(proxy.Proxy, "shutdown", lambda gateway: events.append(("shutdown", gateway)))
-    monkeypatch.setattr(proxy, "sleep_loop", lambda gateway: events.append(("wait", gateway)))
+    monkeypatch.setattr(proxy, "sleep_loop", wait)
     return events
 
 
-def test_main_starts_proxy_with_defaults(tmp_path: Path, lifecycle: list[tuple[str, proxy.Proxy]]) -> None:
-    assert cli.main(["--data-dir", str(tmp_path)]) == 0
+def test_main_starts_proxy_with_defaults(
+    isolated_proxy_args: list[str], lifecycle: list[tuple[str, proxy.Proxy]]
+) -> None:
+    assert cli.main(isolated_proxy_args) == 0
 
     gateway = lifecycle[0][1]
     assert lifecycle == [("setup", gateway), ("wait", gateway), ("shutdown", gateway)]
@@ -54,6 +77,7 @@ def test_main_starts_proxy_with_defaults(tmp_path: Path, lifecycle: list[tuple[s
 def test_main_forwards_custom_and_passthrough_arguments(
     explicit_argv: bool,
     tmp_path: Path,
+    isolated_proxy_args: list[str],
     monkeypatch: pytest.MonkeyPatch,
     lifecycle: list[tuple[str, proxy.Proxy]],
 ) -> None:
@@ -68,8 +92,7 @@ def test_main_forwards_custom_and_passthrough_arguments(
         "1",
         "--num-acceptors",
         "2",
-        "--data-dir",
-        str(tmp_path),
+        *isolated_proxy_args,
     ]
     process_argv = ["caller", "--port", "1"] if explicit_argv else ["egress-gateway", *argv]
     monkeypatch.setattr(sys, "argv", process_argv)
@@ -82,43 +105,64 @@ def test_main_forwards_custom_and_passthrough_arguments(
     assert gateway.flags.log_level == "DEBUG"
     assert gateway.flags.num_workers == 1
     assert gateway.flags.num_acceptors == 2
-    assert gateway.flags.proxy_py_data_dir == str(tmp_path)
+    assert gateway.flags.proxy_py_data_dir == str(tmp_path / "data")
+    assert gateway.flags.cache_dir == str(tmp_path / "cache")
     assert gateway.flags.plugins[b"HttpProxyBasePlugin"] == [EgressAllowlistPlugin]
     assert sys.argv is process_argv
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(RuntimeError("wait failed"), id="runtime-error"),
+        pytest.param(SystemExit(0), id="signal-exit"),
+        pytest.param(KeyboardInterrupt(), id="keyboard-interrupt"),
+    ],
+)
 def test_main_shuts_down_when_waiting_raises(
-    tmp_path: Path,
+    error: BaseException,
+    isolated_proxy_args: list[str],
     monkeypatch: pytest.MonkeyPatch,
     lifecycle: list[tuple[str, proxy.Proxy]],
 ) -> None:
-    def fail_wait(gateway: proxy.Proxy) -> None:
-        lifecycle.append(("wait", gateway))
-        raise RuntimeError("wait failed")
+    def fail_wait() -> None:
+        lifecycle.append(("wait", lifecycle[0][1]))
+        raise error
 
     monkeypatch.setattr(proxy, "sleep_loop", fail_wait)
 
-    with pytest.raises(RuntimeError, match="wait failed"):
-        cli.main(["--data-dir", str(tmp_path)])
+    with pytest.raises(type(error)) as exc:
+        cli.main(isolated_proxy_args)
+
+    assert exc.value is error
+    if isinstance(error, SystemExit):
+        assert error.code == 0
 
     gateway = lifecycle[0][1]
     assert lifecycle == [("setup", gateway), ("wait", gateway), ("shutdown", gateway)]
 
 
-def test_help_does_not_import_proxy(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    real_import = builtins.__import__
+def test_help_does_not_import_proxy() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\nsys.modules['proxy'] = None\n"
+            "from egress_gateway.cli import main\nmain(['--help'])\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
-    def without_proxy(name: str, *args: object, **kwargs: object) -> object:
-        if name == "proxy" or name.startswith("proxy."):
-            raise ModuleNotFoundError("proxy.py is unavailable")
-        return real_import(name, *args, **kwargs)
+    assert result.returncode == 0, result.stderr
+    assert "--port" in result.stdout
 
-    monkeypatch.setattr(builtins, "__import__", without_proxy)
 
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["--help"])
-
-    assert exc.value.code == 0
-    assert "--port" in capsys.readouterr().out
+def test_package_preserves_host_allowed_export() -> None:
+    assert egress_gateway.__all__ == ["host_allowed"]
+    assert egress_gateway.host_allowed is host_allowed
+    namespace: dict[str, object] = {}
+    exec("from egress_gateway import *", namespace)
+    assert namespace["host_allowed"] is host_allowed
+    assert not hasattr(egress_gateway, "unknown_attribute")

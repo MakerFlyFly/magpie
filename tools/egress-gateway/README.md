@@ -107,8 +107,18 @@ uv run --project tools/egress-gateway --group dev pytest
 
 Tests cover the allowlist policy (`host_allowed`) and CLI startup against
 the installed proxy.py argument parser and plugin loader.
-CLI tests replace socket setup, shutdown, and the wait loop;
-live proxy integration is tested locally because it needs to bind a port.
+CLI tests use temporary runtime directories and replace socket setup,
+shutdown, and the wait loop.
+Live proxy integration is not exercised in CI because it needs to bind a port.
+To verify it manually, start the gateway as shown above, then run this in
+a second terminal with curl available:
+
+```bash
+curl --noproxy "" --proxy http://127.0.0.1:8899 --max-time 5 --include http://example.com/
+```
+
+With the default allowlist, expect HTTP 403 and
+`egress-gateway: host not on allowlist`.
 
 ## Caveat — host-level, not payload-level
 
