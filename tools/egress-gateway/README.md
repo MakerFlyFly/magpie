@@ -59,6 +59,10 @@ uv run --project tools/egress-gateway egress-gateway          # 127.0.0.1:8899
 uv run --project tools/egress-gateway egress-gateway --port 9000
 ```
 
+The supported mode is the default allowlisting forward proxy.
+Additional proxy.py arguments are passed through without filtering and must be supplied by a trusted operator.
+Extra services, plugins, and replacement handlers are outside the allowlist guarantee.
+
 proxy.py keeps runtime state under `$HOME/.proxy`; if HOME is not writable
 in your environment, point it somewhere writable for this process:
 
@@ -106,7 +110,8 @@ uv run --project tools/egress-gateway --group dev pytest
 ```
 
 Tests cover the allowlist policy (`host_allowed`) and CLI startup against
-the installed proxy.py argument parser and plugin loader.
+the installed proxy.py argument parser and plugin loader, including the
+default forward-proxy service configuration.
 CLI tests use temporary runtime directories and replace socket setup,
 shutdown, and the wait loop.
 Live proxy integration is not exercised in CI because it needs to bind a port.

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import proxy
 import pytest
+from proxy.http.proxy import HttpProxyPlugin
 
 import egress_gateway
 from egress_gateway import cli
@@ -71,6 +72,9 @@ def test_main_starts_proxy_with_defaults(
     assert gateway.flags.port == 8899
     assert gateway.flags.log_level == "INFO"
     assert gateway.flags.plugins[b"HttpProxyBasePlugin"] == [EgressAllowlistPlugin]
+    assert gateway.flags.plugins[b"HttpProtocolHandlerPlugin"] == [HttpProxyPlugin]
+    assert gateway.flags.plugins[b"HttpWebServerBasePlugin"] == []
+    assert gateway.flags.plugins[b"ReverseProxyBasePlugin"] == []
 
 
 @pytest.mark.parametrize("explicit_argv", [True, False])
