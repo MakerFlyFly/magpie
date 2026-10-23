@@ -204,6 +204,8 @@ by swapping the adapter, not the skill.
   ordinary ID stream fail explicitly rather than returning a successful
   incomplete thread; there are no automatic retries or partial results.
   An incomplete batch stops the read before any later batch is requested.
+  Ambiguous topic URLs with two numeric path segments are rejected before HTTP;
+  callers can use the topic id instead.
   Coverage is not complete or selectable as an archive backend yet.
   `DISCOURSE_API_KEY` + `DISCOURSE_API_USERNAME` cover authorised private reads
   and are only sent within the `DISCOURSE_URL` origin and configured path.

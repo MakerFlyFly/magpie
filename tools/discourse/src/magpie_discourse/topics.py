@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import unquote
 
 from magpie_discourse.client import DiscourseConfig, DiscourseError, get_json, origin, parse_url
 
@@ -30,8 +31,7 @@ POSTS_CHUNK_SIZE = 20
 #: Default ceiling on posts read for one topic; a longer topic is marked truncated.
 DEFAULT_MAX_POSTS = 500
 
-_TOPIC_PATH = re.compile(r"^/t/(?:[^/]+/)?(?P<id>\d+)(?:/\d+)?(?:\.json)?/?$")
-_SHORT_TOPIC_PATH = re.compile(r"^/t/(?P<id>[0-9]+)(?:/[0-9]+)?(?:\.json)?/?$")
+_TOPIC_PATH = re.compile(r"^/t/(?:(?P<slug>[^/]+)/)?(?P<id>\d+)(?:/(?P<post_number>\d+))?(?:\.json)?/?$")
 
 
 def parse_topic_ref(ref: str, config: DiscourseConfig) -> int:
@@ -51,9 +51,12 @@ def parse_topic_ref(ref: str, config: DiscourseConfig) -> int:
     if base.path and not path.startswith(f"{base.path}/"):
         raise DiscourseError(f"Topic URL is not under the configured forum path {base.path}: {ref}")
     topic_path = path[len(base.path) :]
-    match = _SHORT_TOPIC_PATH.match(topic_path) or _TOPIC_PATH.match(topic_path)
+    match = _TOPIC_PATH.match(topic_path)
     if not match or int(match.group("id")) < 1:
         raise DiscourseError(f"Not a Discourse topic URL: {ref}")
+    slug = match.group("slug")
+    if slug is not None and match.group("post_number") is None and re.fullmatch(r"[0-9]+", unquote(slug)):
+        raise DiscourseError("Ambiguous Discourse topic URL: use the numeric topic id instead")
     return int(match.group("id"))
 
 
