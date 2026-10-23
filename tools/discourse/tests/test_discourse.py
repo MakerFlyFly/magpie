@@ -367,9 +367,8 @@ def test_topic_url_accepts_the_effective_https_port(config: DiscourseConfig) -> 
 
 
 @pytest.mark.parametrize("path", ["/t/42/7", "/t/42/7.json"])
-def test_ambiguous_short_post_urls_are_rejected(config: DiscourseConfig, path: str) -> None:
-    with pytest.raises(DiscourseError, match="Ambiguous"):
-        topics.parse_topic_ref(f"{BASE}{path}", config)
+def test_short_post_urls_use_the_topic_id(config: DiscourseConfig, path: str) -> None:
+    assert topics.parse_topic_ref(f"{BASE}{path}", config) == 42
 
 
 @pytest.mark.parametrize("url", [f"{BASE}:bad", f"{BASE}:65536", "https://[broken"])
@@ -1194,43 +1193,52 @@ def test_encoded_base_paths_keep_their_original_spelling(
 
 @pytest.mark.parametrize("base_path", ["", "/forum"])
 @pytest.mark.parametrize(
-    "path",
+    ("path", "topic_id"),
     [
-        "/t/2026/42",
-        "/t/42/7",
-        "/t/2026/42/",
-        "/t/2026/42.json",
-        "/t/002026/0042.json/?u=reader#post-7",
-        "/t/2026/42?u=reader#post-42",
-        "/t/%32%30%32%36/42",
-        "/t/20%32%36/42",
+        ("/t/2026/42", 2026),
+        ("/t/42/7", 42),
+        ("/t/2026/42/", 2026),
+        ("/t/2026/42.json", 2026),
+        ("/t/002026/0042.json/?u=reader#post-7", 2026),
+        ("/t/2026/42?u=reader#post-42", 2026),
+        ("/t/42/7?u=alice", 42),
+        ("/t/%32%30%32%36/42", 42),
+        ("/t/20%32%36/42", 42),
     ],
 )
-def test_cli_rejects_ambiguous_numeric_topic_urls_before_requesting(
+def test_cli_topic_urls_follow_discourse_route_precedence(
     monkeypatch: pytest.MonkeyPatch,
     forum_env: None,
     capsys: pytest.CaptureFixture[str],
     base_path: str,
     path: str,
+    topic_id: int,
 ) -> None:
+    # Discourse's numeric topic/post route precedes the slug route; Slug.for
+    # rejects generated numeric-only slugs. Match raw paths before decoding.
+    # https://github.com/discourse/discourse/blob/c9d334e8b2ef730fa70fcbb880a16d79f4b5e7d2/config/routes.rb#L1671-L1691
+    # https://github.com/discourse/discourse/blob/c9d334e8b2ef730fa70fcbb880a16d79f4b5e7d2/lib/slug.rb#L23-L34
     monkeypatch.setenv("DISCOURSE_URL", f"{BASE}{base_path}")
     monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
     monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
+    slugs = {2026: "annual-update", 42: "discussion"}
     forum = _serve(
         monkeypatch,
         {
-            f"{base_path}/t/2026.json": _topic([], [], id=2026, slug="unrelated-topic"),
-            f"{base_path}/t/42.json": _topic([_post(100, 1)], [100], slug="2026"),
+            f"{base_path}/t/{value}.json": _topic([_post(100, 1)], [100], id=value, slug=slug)
+            for value, slug in slugs.items()
         },
     )
-    assert package_main(["topic", "view", f"{BASE}{base_path}{path}"]) == 1
+    assert package_main(["topic", "view", f"{BASE}{base_path}{path}"]) == 0
     output = capsys.readouterr()
-    assert output.out == ""
-    assert "Ambiguous" in output.err
-    assert "topic id" in output.err
-    assert "Traceback" not in output.err
-    assert "test-key" not in output.err
-    assert forum.requests == []
+    thread = json.loads(output.out)
+    assert output.err == ""
+    assert thread["thread_id"] == str(topic_id)
+    assert thread["url"] == f"{BASE}{base_path}/t/{slugs[topic_id]}/{topic_id}"
+    assert thread["messages"][0]["body"] == "<p>post 1</p>"
+    assert [request.full_url for request in forum.requests] == [f"{BASE}{base_path}/t/{topic_id}.json"]
+    assert forum.requests[0].get_header("Api-key") == "test-key"
+    assert forum.requests[0].get_header("Api-username") == "reader"
 
 
 @pytest.mark.parametrize("base_path", ["", "/forum"])
@@ -1244,9 +1252,12 @@ def test_cli_rejects_ambiguous_numeric_topic_urls_before_requesting(
         "/t/discussion/42/7",
         "/t/2026/42/7",
         "/t/%32%30%32%36/42/7.json?u=reader#post-7",
+        "/t/%E4%B8%AD%E6%96%87/42",
+        "/t/\u8ba8\u8bba/42",
+        "/t/\uff12\uff10\uff12\uff16/42",
     ],
 )
-def test_cli_unambiguous_references_keep_the_intended_topic(
+def test_cli_supported_topic_references_keep_the_intended_topic(
     monkeypatch: pytest.MonkeyPatch,
     forum_env: None,
     capsys: pytest.CaptureFixture[str],
@@ -1256,7 +1267,7 @@ def test_cli_unambiguous_references_keep_the_intended_topic(
     monkeypatch.setenv("DISCOURSE_URL", f"{BASE}{base_path}")
     forum = _serve(
         monkeypatch,
-        {f"{base_path}/t/42.json": _topic([_post(100, 1)], [100], slug="2026")},
+        {f"{base_path}/t/42.json": _topic([_post(100, 1)], [100], slug="discussion")},
     )
     value = ref if ref == "42" else f"{BASE}{base_path}{ref}"
     assert package_main(["topic", "view", value]) == 0
@@ -1265,5 +1276,65 @@ def test_cli_unambiguous_references_keep_the_intended_topic(
     assert output.err == ""
     assert thread["thread_id"] == "42"
     assert thread["messages"][0]["body"] == "<p>post 1</p>"
-    assert thread["url"] == f"{BASE}{base_path}/t/2026/42"
+    assert thread["url"] == f"{BASE}{base_path}/t/discussion/42"
     assert [request.full_url for request in forum.requests] == [f"{BASE}{base_path}/t/42.json"]
+
+
+@pytest.mark.parametrize("base_path", ["", "/forum"])
+def test_cli_canonical_topic_url_can_be_read_again(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    base_path: str,
+) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", f"{BASE}{base_path}")
+    forum = _serve(
+        monkeypatch,
+        {f"{base_path}/t/42.json": _topic([_post(100, 1)], [100], slug="discussion")},
+    )
+    assert package_main(["topic", "view", f"{BASE}{base_path}/t/42/7?u=alice"]) == 0
+    first = capsys.readouterr()
+    thread = json.loads(first.out)
+    assert first.err == ""
+    assert package_main(["topic", "view", thread["url"]]) == 0
+    second = capsys.readouterr()
+    assert second.err == ""
+    assert json.loads(second.out) == thread
+    assert [request.full_url for request in forum.requests] == [f"{BASE}{base_path}/t/42.json"] * 2
+
+
+@pytest.mark.parametrize("base_path", ["", "/forum"])
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "\uff14\uff12",
+        "\u0664\u0662",
+        "/t/\uff14\uff12",
+        "/t/slug/\uff14\uff12",
+        "/t/slug/42/\uff17",
+        "/t/42/\uff17",
+        "/t/slug/\u0664\u0662",
+        "/t/slug/42/\u0667",
+        "/t/slug/4\uff12",
+        "/t/slug/42/7\uff17",
+    ],
+)
+def test_cli_non_ascii_topic_ids_and_post_numbers_fail_before_requesting(
+    monkeypatch: pytest.MonkeyPatch,
+    forum_env: None,
+    capsys: pytest.CaptureFixture[str],
+    base_path: str,
+    ref: str,
+) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", f"{BASE}{base_path}")
+    monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
+    monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
+    forum = _serve(monkeypatch, {})
+    value = f"{BASE}{base_path}{ref}" if ref.startswith("/") else ref
+    assert package_main(["topic", "view", value]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "magpie-discourse error:" in output.err
+    assert "Traceback" not in output.err
+    assert "test-key" not in output.err
+    assert forum.requests == []

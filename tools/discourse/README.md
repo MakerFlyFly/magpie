@@ -97,11 +97,11 @@ as latin-1 HTTP headers.
 Unsupported credentials and invalid base paths fail during configuration
 validation, before a request, without including credential values in the error.
 Topic share URLs may include query parameters or fragments.
-URLs with two numeric segments after `/t/`, such as `/t/2026/42`, are ambiguous:
-they can identify a topic/post pair or a numeric slug/topic pair.
-They are rejected before HTTP, including percent-encoded numeric slugs; use the numeric topic id instead.
-Unambiguous URLs such as `/t/42`, `/t/discussion/42/7` and `/t/2026/42/7` remain supported.
-Canonical output URLs are preserved, so use `thread_id` to reload a topic whose numeric-slug URL is ambiguous.
+Two numeric segments after `/t/` mean topic id and post number, matching Discourse's route precedence:
+`/t/2026/42` reads topic `2026`, and `/t/42/7` reads topic `42`.
+Discourse's normal slug generator rejects numeric-only slugs.
+A post URL still reads its topic, rather than filtering to that post.
+Topic ids and post numbers in URLs must use ASCII digits; Unicode slugs remain supported.
 Topic ids and `--max-posts` must be positive integers.
 Use percent-encoded non-ASCII characters and spaces in the configured base path
 (`/%E8%AE%BA%E5%9D%9B`, `/my%20forum`); raw Unicode or spaces in that path are refused.
