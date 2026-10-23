@@ -1309,6 +1309,9 @@ def test_cli_canonical_topic_url_can_be_read_again(
     [
         "\uff14\uff12",
         "\u0664\u0662",
+        "4\uff12",
+        "\u00b2",
+        " \uff14\uff12 ",
         "/t/\uff14\uff12",
         "/t/slug/\uff14\uff12",
         "/t/slug/42/\uff17",
@@ -1335,6 +1338,8 @@ def test_cli_non_ascii_topic_ids_and_post_numbers_fail_before_requesting(
     output = capsys.readouterr()
     assert output.out == ""
     assert "magpie-discourse error:" in output.err
+    if not ref.startswith("/"):
+        assert output.err == "magpie-discourse error: Topic id must use ASCII digits\n"
     assert "Traceback" not in output.err
     assert "test-key" not in output.err
     assert forum.requests == []

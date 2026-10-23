@@ -42,6 +42,8 @@ def parse_topic_ref(ref: str, config: DiscourseConfig) -> int:
         if topic_id > 0:
             return topic_id
         raise DiscourseError("Topic id must be a positive integer")
+    if value.isdigit():
+        raise DiscourseError("Topic id must use ASCII digits")
 
     parsed = parse_url(value)
     base = parse_url(config.base_url)
