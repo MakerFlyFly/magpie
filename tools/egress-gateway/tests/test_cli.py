@@ -29,7 +29,7 @@ import pytest
 from proxy.http.proxy import HttpProxyPlugin
 
 import egress_gateway
-from egress_gateway import cli
+import egress_gateway.cli as cli
 from egress_gateway.allowlist import EgressAllowlistPlugin, host_allowed
 
 
@@ -152,7 +152,7 @@ def test_help_does_not_import_proxy() -> None:
             sys.executable,
             "-c",
             "import sys\nsys.modules['proxy'] = None\n"
-            "from egress_gateway.cli import main\nmain(['--help'])\n",
+            + "from egress_gateway.cli import main\nmain(['--help'])\n",
         ],
         capture_output=True,
         text=True,
