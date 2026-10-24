@@ -95,8 +95,8 @@ jobs:
   # pull request touching a few projects gets one job per project, so
   # per-project pass/fail shows in the checks list; a full run batches
   # them, and each batch job prints a group and a summary row per
-  # member. The `prek` workflow still exercises pytest as a hook, so
-  # this workflow is the visible signal — not the gate.
+  # member. The required `tests-ok` job below aggregates discovery
+  # and matrix results; the `prek` workflow skips workspace pytest.
   pytest:
     name: "pytest (${{ matrix.batch.name }})"
     runs-on: ubuntu-slim
@@ -204,27 +204,31 @@ jobs:
   # with N entries would otherwise force N `.asf.yaml` lines that
   # must be kept in lock-step with the matrix. This single
   # `tests-ok` job is the only pytest-related context required by
-  # branch protection — it passes iff every entry in the `pytest`
-  # matrix above passed. Adding, renaming, or removing matrix
-  # entries no longer touches `.asf.yaml`.
+  # branch protection — it requires successful member discovery and
+  # a passing matrix (or an empty selection). Adding, renaming, or
+  # removing matrix entries no longer touches `.asf.yaml`.
   tests-ok:
     name: tests-ok
     runs-on: ubuntu-slim
-    needs: pytest
+    needs: [members, pytest]
     # `always()` — without it, this job would be skipped (not
     # failed) when an upstream matrix entry fails, and a skipped
-    # required-check is treated as missing by branch protection,
-    # which leaves the PR mergeable. Run unconditionally and assert
-    # on the result instead.
+    # required check does not block merging. Run unconditionally and
+    # assert on discovery as well: its failure skips the matrix too.
     if: always()
     steps:
-      - name: Assert all pytest matrix entries succeeded
+      - name: Assert member discovery and pytest matrix results
         # `success` — every selected member passed.
         # `skipped` — the path filter selected no members (the PR
         #   changed no project's Python source/test files), so there
-        #   was nothing to run; that is a pass, not a gap.
+        #   was nothing to run; after successful discovery, that is a pass.
         # Anything else (`failure` / `cancelled`) fails the gate.
         run: |
+          members_result="${{ needs.members.result }}"
+          if [ "${members_result}" != "success" ]; then
+            echo "workspace member discovery result: ${members_result}"
+            exit 1
+          fi
           result="${{ needs.pytest.result }}"
           if [ "${result}" != "success" ] && [ "${result}" != "skipped" ]; then
             echo "pytest matrix result: ${result}"
