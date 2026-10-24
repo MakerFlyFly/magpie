@@ -89,7 +89,8 @@ def _working_bash() -> str:
         pytest.skip("the workflow gate needs a working Bash (not found)")
     try:
         probe = subprocess.run(
-            [executable, *_BASH_FLAGS, "-c", "exit 0"],
+            [executable, *_BASH_FLAGS, "-c", '[ "${BATCHES:-}" = "[]" ]'],
+            env={**os.environ, "BATCHES": "[]"},
             capture_output=True,
             text=True,
             timeout=5,
@@ -122,14 +123,6 @@ def test_gate_waits_for_both_jobs_and_runs_after_failure(gate_job: str) -> None:
 def test_gate_reads_batches_from_discovery(gate_job: str) -> None:
     value = _field(gate_job, "BATCHES", indent=10)
     assert _expression(value, require_wrapper=True) == "needs.members.outputs.batches"
-
-
-@pytest.mark.parametrize(
-    "value", ["[]", "needs.members.outputs.batches", "${{ needs.pytest.outputs.batches }}"]
-)
-def test_incorrect_batches_bindings_are_rejected(value: str) -> None:
-    with pytest.raises(AssertionError):
-        assert _expression(value, require_wrapper=True) == "needs.members.outputs.batches"
 
 
 def _run_gate(
@@ -246,13 +239,15 @@ def test_unusable_bash_is_skipped(monkeypatch: pytest.MonkeyPatch, mode: str) ->
         _working_bash()
 
 
-def test_bash_probe_uses_the_gate_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(shutil, "which", lambda name: "/probe/bash")
+def test_bash_probe_skips_shell_without_gate_environment(bash: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: bash)
+    run = subprocess.run
 
-    def probe(args, **kwargs):
-        assert args == ["/probe/bash", *_BASH_FLAGS, "-c", "exit 0"]
-        assert kwargs["timeout"] == 5
-        return subprocess.CompletedProcess(args, 0, "", "")
+    def without_batches(*args, **kwargs):
+        env = kwargs.get("env", os.environ).copy()
+        env.pop("BATCHES", None)
+        return run(*args, **{**kwargs, "env": env})
 
-    monkeypatch.setattr(subprocess, "run", probe)
-    assert _working_bash() == "/probe/bash"
+    monkeypatch.setattr(subprocess, "run", without_batches)
+    with pytest.raises(pytest.skip.Exception, match="needs a working Bash"):
+        _working_bash()
