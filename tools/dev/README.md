@@ -86,3 +86,5 @@ a human has to remember to update while thinking about something else.
 - **CLIs:** `uv` (the workspace checks run `uv run`), `git`, and `prek` (or `pre-commit`) — these scripts wire up the framework's hooks.
 - **Credentials / auth:** None.
 - **Network:** Local checks; `uv` may resolve workspace dependencies from PyPI (`pypi.org`, `files.pythonhosted.org`) on first sync.
+
+<!-- Hosted CI probe: documentation-only workspace selection. -->
