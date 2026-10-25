@@ -32,6 +32,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from textwrap import dedent
+from typing import NoReturn
 
 import pytest
 
@@ -83,10 +84,19 @@ def _assert_dependencies(job: str) -> None:
     assert _expression(_field(job, "if")) == "always()"
 
 
+def _unusable_bash(reason: str) -> NoReturn:
+    # Skip only off CI: on the Linux runner a broken Bash must fail, or every
+    # gate test would quietly skip and the required check would stay green.
+    message = f"the workflow gate needs a working Bash ({reason})"
+    if os.environ.get("CI"):
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 def _working_bash() -> str:
     executable = shutil.which("bash")
     if executable is None:
-        pytest.skip("the workflow gate needs a working Bash (not found)")
+        _unusable_bash("not found")
     try:
         probe = subprocess.run(
             [executable, *_BASH_FLAGS, "-c", '[ "${BATCHES:-}" = "[]" ]'],
@@ -97,14 +107,14 @@ def _working_bash() -> str:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        pytest.skip(f"the workflow gate needs a working Bash ({type(error).__name__})")
+        _unusable_bash(type(error).__name__)
     else:
         if probe.returncode != 0:
-            pytest.skip(f"the workflow gate needs a working Bash (probe exit {probe.returncode})")
+            _unusable_bash(f"probe exit {probe.returncode}")
     return executable
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def gate_job() -> str:
     # Read only this job's literal block; no YAML dependency is needed.
     match = re.search(r"(?ms)^  tests-ok:\n(.*?)(?=^  \S|\Z)", _WORKFLOW.read_text(encoding="utf-8"))
@@ -129,7 +139,12 @@ def test_gate_reads_batches_from_discovery(gate_job: str) -> None:
 def _run_gate(
     gate_job: str, bash: str, members_result: str, pytest_result: str, batches: str | None = "[]"
 ) -> subprocess.CompletedProcess[str]:
-    run = re.search(r"(?m)^        run: \|\n((?:          .*\n|\n)+)", gate_job)
+    # The assert step's own `run: |` block, found by its name, so a step added
+    # before it can never be the script under test.
+    run = re.search(
+        r"(?ms)^      - name: Assert member discovery and pytest matrix results\n.*?^        run: \|\n((?:          .*\n|\n)+)",
+        gate_job,
+    )
     assert run is not None, "tests-ok shell assertion is missing"
     script = dedent(run[1])
     for job, result in (("members", members_result), ("pytest", pytest_result)):
@@ -226,6 +241,7 @@ def test_incorrect_dependency_declarations_are_rejected(needs: str, condition: s
 
 @pytest.mark.parametrize("mode", ["missing", "launch-error", "timeout", "nonzero"])
 def test_unusable_bash_is_skipped(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: None if mode == "missing" else "/probe/bash")
 
     def probe(*args, **kwargs):
@@ -241,6 +257,7 @@ def test_unusable_bash_is_skipped(monkeypatch: pytest.MonkeyPatch, mode: str) ->
 
 
 def test_bash_probe_skips_shell_without_gate_environment(bash: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: bash)
     run = subprocess.run
 
@@ -252,3 +269,17 @@ def test_bash_probe_skips_shell_without_gate_environment(bash: str, monkeypatch:
     monkeypatch.setattr(subprocess, "run", without_batches)
     with pytest.raises(pytest.skip.Exception, match="needs a working Bash"):
         _working_bash()
+
+
+def test_unusable_bash_fails_on_ci(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    with pytest.raises(pytest.fail.Exception, match="needs a working Bash"):
+        _working_bash()
+
+
+def test_gate_step_runs_with_the_tested_shell_flags(gate_job: str) -> None:
+    step = gate_job.split("- name: Assert member discovery and pytest matrix results", 1)[1]
+    assert re.search(r"(?m)^        shell: bash\s*$", step), (
+        "the gate step must set `shell: bash` to match _BASH_FLAGS"
+    )

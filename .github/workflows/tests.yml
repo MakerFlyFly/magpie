@@ -219,6 +219,9 @@ jobs:
     if: always()
     steps:
       - name: Assert member discovery and pytest matrix results
+        # Explicit, so the runner uses the same flags the gate test runs it
+        # with (`--noprofile --norc -eo pipefail`), not the `bash -e` default.
+        shell: bash
         env:
           BATCHES: ${{ needs.members.outputs.batches }}
         # `success` — every selected member passed.
