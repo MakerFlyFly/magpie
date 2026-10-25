@@ -98,8 +98,9 @@ def _working_bash() -> str:
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         pytest.skip(f"the workflow gate needs a working Bash ({type(error).__name__})")
-    if probe.returncode != 0:
-        pytest.skip(f"the workflow gate needs a working Bash (probe exit {probe.returncode})")
+    else:
+        if probe.returncode != 0:
+            pytest.skip(f"the workflow gate needs a working Bash (probe exit {probe.returncode})")
     return executable
 
 
