@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import email
 import email.policy
+import json
 
 import pytest
 
 from conftest import FakeMailbox, build_message, make_config
+from imap_source.cli import print_json
 from imap_source.create_draft import create_draft
+from imap_source.list_drafts import list_drafts
 from imap_source.list_recent_threads import list_recent_threads
+from imap_source.list_sent_since import list_sent_since
 from imap_source.read_thread import read_thread
 from imap_source.searching import parse_message
 from imap_source.threads import summarise
@@ -62,6 +66,33 @@ REPLY = "<subject-reply@example.org>"
             id="encoded-crlf",
         ),
         pytest.param((b"Subject: =?utf-8?q?A=0Areport?=", "A report", "Re: A report"), id="encoded-lf"),
+        pytest.param((b"Subject: =?utf-8?q?A=0Breport?=", "A report", "Re: A report"), id="encoded-vt"),
+        pytest.param((b"Subject: =?utf-8?q?A=0Creport?=", "A report", "Re: A report"), id="encoded-ff"),
+        pytest.param((b"Subject: =?utf-8?q?A=1Creport?=", "A report", "Re: A report"), id="encoded-fs"),
+        pytest.param((b"Subject: =?utf-8?q?A=1Dreport?=", "A report", "Re: A report"), id="encoded-gs"),
+        pytest.param((b"Subject: =?utf-8?q?A=1Ereport?=", "A report", "Re: A report"), id="encoded-rs"),
+        pytest.param((b"Subject: =?utf-8?q?A=C2=85report?=", "A report", "Re: A report"), id="encoded-nel"),
+        pytest.param((b"Subject: =?iso-8859-1?q?A=85report?=", "A report", "Re: A report"), id="latin1-nel"),
+        pytest.param((b"Subject: =?utf-8?q?A=E2=80=A8report?=", "A report", "Re: A report"), id="encoded-ls"),
+        pytest.param((b"Subject: =?utf-8?q?A=E2=80=A9report?=", "A report", "Re: A report"), id="encoded-ps"),
+        pytest.param(
+            (
+                b"Subject: =?utf-8?q?A=0D=0A=0B=0C=1C=1D=1E=C2=85=E2=80=A8=E2=80=A9report?=",
+                "A report",
+                "Re: A report",
+            ),
+            id="consecutive-separators",
+        ),
+        pytest.param(
+            (b"Subject: =?utf-8?q?=E2=80=A8A_report?=", " A report", "Re: A report"), id="leading-separator"
+        ),
+        pytest.param(
+            (b"Subject: =?utf-8?q?A_report=E2=80=A9?=", "A report ", "Re: A report"), id="trailing-separator"
+        ),
+        pytest.param((b"Subject: =?utf-8?b?!!!?=", "", "Re: (no subject)"), id="invalid-base64"),
+        pytest.param(
+            (b"Subject: price =?50?= off", "price =?50?= off", "Re: price =?50?= off"), id="literal-marker"
+        ),
         pytest.param((b"Subject:", "", "Re: (no subject)"), id="empty"),
         pytest.param((b"", "", "Re: (no subject)"), id="missing"),
     ]
@@ -108,7 +139,7 @@ def test_summarise_normalises_subject(subject_case: tuple[bytes, str, str]) -> N
 def test_read_operations_return_normalised_subject(
     mailbox: FakeMailbox, subject_case: tuple[bytes, str, str]
 ) -> None:
-    _raw, expected, _reply_subject = subject_case
+    raw, expected, _reply_subject = subject_case
     config = make_config()
     threads = list_recent_threads(mailbox, config, since_days=90)
     assert len(threads) == 1
@@ -117,6 +148,12 @@ def test_read_operations_return_normalised_subject(
     assert thread["subject"] == expected
     assert thread["messages"][0]["subject"] == expected
     assert [message["message_id"] for message in thread["messages"]] == [ROOT, REPLY]
+    mailbox.append("Drafts", raw)
+    mailbox.append("Sent", raw)
+    drafts = list_drafts(mailbox, config, ROOT, since_days=90)
+    sent = list_sent_since(mailbox, config, ROOT, since_days=90)
+    assert [draft["subject"] for draft in drafts] == [expected]
+    assert [message["subject"] for message in sent] == [expected]
 
 
 def test_create_draft_round_trips_normalised_subject(
@@ -158,3 +195,58 @@ def test_create_draft_accepts_automatically_folded_long_subject() -> None:
     parsed = email.message_from_bytes(box.folders["Drafts"][result["draft_uid"]], policy=email.policy.default)
     assert parsed["Subject"] == f"Re: {subject}"
     assert result["sent"] is False
+
+
+def test_summarise_keeps_the_entire_large_plain_subject() -> None:
+    subject = "word " * 20_000 + "the end"
+    raw = b"Subject: " + subject.encode("ascii") + b"\r\n\r\n"
+    assert summarise(parse_message(raw)).subject == subject
+
+
+def test_summarise_decodes_only_once() -> None:
+    raw = b"Subject: =?utf-8?q?=3D=3Futf-8=3Fq=3FRe=3A_x=3F=3D?=\r\n\r\n"
+    assert summarise(parse_message(raw)).subject == "=?utf-8?q?Re: x?="
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        (b"Re: report \xc3\xa9", "Re: report \ufffd\ufffd"),
+        (b"Re: report \xe9", "Re: report \ufffd"),
+        (b"report \xc3\xa9 =?utf-8?q?Re=3A_x?=", "report \ufffd\ufffd Re: x"),
+        (b"raw \\ufffd =?utf-8?q?ok?=", r"raw \ufffd ok"),
+    ],
+)
+def test_compat32_subject_text_remains_compatible(subject: bytes, expected: str) -> None:
+    assert summarise(parse_message(b"Subject: " + subject + b"\r\n\r\n")).subject == expected
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        b"=?idna?q?" + b"a" * 80 + b"?=",
+        b"=?utf-16?q?=FF=FEA?=",
+        b"=?undefined?q?abc?=",
+        b"=?rot13?q?abc?=",
+        b"=?utf-7?q?+AGEAYgBj-?=",
+        b"=?unicode_escape?q?A\\u2028B?=",
+    ],
+)
+def test_unusual_charsets_do_not_prevent_draft_creation(subject: bytes) -> None:
+    raw = f"Message-ID: {ROOT}\r\nFrom: reporter@example.org\r\nSubject: ".encode("ascii")
+    box = FakeMailbox.seed(INBOX=[raw + subject + b"\r\n\r\nbody"], Drafts=[])
+    result = create_draft(box, make_config(), ROOT, body="Thanks.\n", to=[], cc=[], from_address=None)
+    assert result["sent"] is False
+    assert len(box.folders["Drafts"]) == 1
+
+
+@pytest.mark.parametrize(("encoded", "character"), [(b"=00", "\x00"), (b"=1B", "\x1b")])
+def test_json_escapes_control_characters(
+    encoded: bytes, character: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    raw = b"Subject: =?utf-8?q?A" + encoded + b"report?=\r\n\r\n"
+    subject = summarise(parse_message(raw)).subject
+    print_json({"subject": subject})
+    output = capsys.readouterr().out
+    assert character not in output
+    assert json.loads(output)["subject"] == f"A{character}report"

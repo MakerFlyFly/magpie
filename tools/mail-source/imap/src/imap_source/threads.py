@@ -28,6 +28,8 @@ headers are only parsed into identifiers and dates, never interpreted.
 
 from __future__ import annotations
 
+import email.errors
+import email.header
 import email.message
 import email.policy
 import email.utils
@@ -36,6 +38,32 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 _MSG_ID = re.compile(r"<[^<>\s]+>")
+_SUBJECT_BREAKS = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
+
+
+def _normalise_subject(value: str) -> str:
+    """Unfold and decode a Subject without parsing a header object on the normal path."""
+    unfolded = value.replace("\r", "").replace("\n", "")
+    if "=?" not in unfolded:
+        return _SUBJECT_BREAKS.sub(" ", unfolded)
+    if not unfolded.isascii():
+        # Keep compat32's raw 8-bit replacement text alongside encoded words.
+        decoded = str(email.policy.default.header_fetch_parse("Subject", unfolded))
+    else:
+        try:
+            pieces = email.header.decode_header(unfolded)
+        except email.errors.HeaderParseError:
+            return _SUBJECT_BREAKS.sub(" ", unfolded)
+        decoded_parts: list[str] = []
+        for part, charset in pieces:
+            if isinstance(part, bytes):
+                try:
+                    part = part.decode(charset or "ascii", errors="replace")
+                except (LookupError, UnicodeError):
+                    part = part.decode("utf-8", errors="replace")
+            decoded_parts.append(part)
+        decoded = "".join(decoded_parts)
+    return _SUBJECT_BREAKS.sub(" ", decoded)
 
 
 def normalise_message_id(value: str | None) -> str | None:
@@ -85,10 +113,7 @@ def summarise(message: email.message.Message) -> ThreadPosition:
     if from_header:
         display, address = email.utils.parseaddr(str(from_header))
         from_address = address or display or None
-    subject = str(message.get("Subject", "") or "")
-    subject = str(email.policy.default.header_fetch_parse("Subject", subject))
-    # Encoded words can themselves decode to line breaks.
-    subject = re.sub(r"[\r\n]+", " ", subject)
+    subject = _normalise_subject(str(message.get("Subject", "") or ""))
     return ThreadPosition(
         message_id=normalise_message_id(message.get("Message-ID")),
         references=tuple(chain),
