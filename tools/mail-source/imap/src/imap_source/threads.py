@@ -39,13 +39,16 @@ from datetime import UTC, datetime
 
 _MSG_ID = re.compile(r"<[^<>\s]+>")
 _SUBJECT_BREAKS = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
+# Bound decoder work without discarding oversized subjects.
+_SUBJECT_DECODE_LIMIT = 8192
 
 
 def _normalise_subject(value: str) -> str:
     """Unfold and decode a Subject without parsing a header object on the normal path."""
     unfolded = value.replace("\r", "").replace("\n", "")
-    if "=?" not in unfolded:
+    if len(unfolded) > _SUBJECT_DECODE_LIMIT or "=?" not in unfolded:
         return _SUBJECT_BREAKS.sub(" ", unfolded)
+    unfolded = _SUBJECT_BREAKS.sub(" ", unfolded)
     if not unfolded.isascii():
         # Keep compat32's raw 8-bit replacement text alongside encoded words.
         decoded = str(email.policy.default.header_fetch_parse("Subject", unfolded))
@@ -59,7 +62,7 @@ def _normalise_subject(value: str) -> str:
             if isinstance(part, bytes):
                 try:
                     part = part.decode(charset or "ascii", errors="replace")
-                except (LookupError, UnicodeError):
+                except (LookupError, ValueError):
                     part = part.decode("utf-8", errors="replace")
             decoded_parts.append(part)
         decoded = "".join(decoded_parts)

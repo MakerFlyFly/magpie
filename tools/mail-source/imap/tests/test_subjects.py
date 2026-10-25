@@ -26,7 +26,7 @@ import json
 import pytest
 
 from conftest import FakeMailbox, build_message, make_config
-from imap_source.cli import print_json
+from imap_source.cli import print_json, run_operation
 from imap_source.create_draft import create_draft
 from imap_source.list_drafts import list_drafts
 from imap_source.list_recent_threads import list_recent_threads
@@ -61,6 +61,8 @@ REPLY = "<subject-reply@example.org>"
             (b"Subject: =?unknown-charset?q?Re=3A_report?=", "Re: report", "Re: report"),
             id="unknown-charset",
         ),
+        pytest.param((b"Subject: =?utf-8\x00?q?Re=3A_x?=", "Re: x", "Re: x"), id="nul-charset-q"),
+        pytest.param((b"Subject: =?utf-8\x00?b?UmU6IHg=?=", "Re: x", "Re: x"), id="nul-charset-b"),
         pytest.param(
             (b"Subject: =?utf-8?q?A=0D=0Areport?=", "A report", "Re: A report"),
             id="encoded-crlf",
@@ -230,6 +232,8 @@ def test_compat32_subject_text_remains_compatible(subject: bytes, expected: str)
         b"=?rot13?q?abc?=",
         b"=?utf-7?q?+AGEAYgBj-?=",
         b"=?unicode_escape?q?A\\u2028B?=",
+        b"=?utf-8\x00?q?Re=3A_x?=",
+        b"=?utf-8\x00?b?UmU6IHg=?=",
     ],
 )
 def test_unusual_charsets_do_not_prevent_draft_creation(subject: bytes) -> None:
@@ -238,6 +242,102 @@ def test_unusual_charsets_do_not_prevent_draft_creation(subject: bytes) -> None:
     result = create_draft(box, make_config(), ROOT, body="Thanks.\n", to=[], cc=[], from_address=None)
     assert result["sent"] is False
     assert len(box.folders["Drafts"]) == 1
+
+
+@pytest.mark.parametrize("encoded", [b"q?Re=3A_x", b"b?UmU6IHg="])
+@pytest.mark.parametrize(
+    "operation", ["list_recent_threads", "read_thread", "list_drafts", "list_sent_since", "create_draft"]
+)
+def test_unrelated_nul_charset_does_not_block_operations(
+    encoded: bytes, operation: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    healthy = build_message(ROOT, "A report", "reporter@example.org")
+    unrelated = (
+        b"Message-ID: <unrelated@example.org>\r\nFrom: other@example.org\r\n"
+        b"Subject: =?utf-8\x00?" + encoded + b"?=\r\n\r\nbody"
+    )
+    box = FakeMailbox.seed(INBOX=[healthy, unrelated], Drafts=[healthy, unrelated], Sent=[healthy, unrelated])
+    config = make_config()
+    operations = {
+        "list_recent_threads": lambda: list_recent_threads(box, config, since_days=90),
+        "read_thread": lambda: read_thread(box, config, ROOT, since_days=90),
+        "list_drafts": lambda: list_drafts(box, config, ROOT, since_days=90),
+        "list_sent_since": lambda: list_sent_since(box, config, ROOT, since_days=90),
+        "create_draft": lambda: create_draft(
+            box, config, ROOT, body="Thanks.\n", to=[], cc=[], from_address=None
+        ),
+    }
+    assert run_operation(operations[operation]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    if operation == "list_recent_threads":
+        assert any(item["thread_id"] == ROOT and item["subject"] == "A report" for item in payload)
+    elif operation in ("list_drafts", "list_sent_since"):
+        assert [item["subject"] for item in payload] == ["A report"]
+    else:
+        assert payload["thread_id"] == ROOT
+        assert payload["subject"] == ("Re: A report" if operation == "create_draft" else "A report")
+    if operation == "create_draft":
+        assert payload["sent"] is False
+        assert len(box.folders["Drafts"]) == 3
+
+
+@pytest.mark.parametrize("length", [8191, 8192, 8193])
+@pytest.mark.parametrize("prefix", [b"", b"\xff "])
+def test_subject_decode_budget_preserves_complete_text(
+    length: int, prefix: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    encoded = b"=?utf-8?q?Re=3A_x?="
+    padding = b" " + b"a" * (length - len(prefix) - len(encoded) - 1)
+    subject = prefix + encoded + padding
+    if length > 8192:
+
+        def unexpected_decode(*args: object, **kwargs: object) -> None:
+            pytest.fail("Oversized subjects must bypass both decoders")
+
+        monkeypatch.setattr(email.header, "decode_header", unexpected_decode)
+        monkeypatch.setattr(email.policy.EmailPolicy, "header_fetch_parse", unexpected_decode)
+    raw = b"Subject: " + subject + b"\r\n\r\n"
+    expected = prefix.decode("ascii", errors="replace")
+    expected += encoded.decode("ascii") if length > 8192 else "Re: x"
+    expected += padding.decode("ascii")
+    assert summarise(parse_message(raw)).subject == expected
+
+
+@pytest.mark.parametrize("prefix", [b"", b"\xff "])
+def test_subject_decode_budget_counts_after_unfolding(prefix: bytes) -> None:
+    encoded = b"=?utf-8?q?Re=3A_x?="
+    padding = b" " + b"a" * (8192 - len(prefix) - len(encoded) - 1)
+    # Folding adds raw bytes but keeps the unfolded value at the decoding limit.
+    raw = b"Subject: " + prefix + encoded + b"\r\n" + padding + b"\r\n\r\n"
+    expected = prefix.decode("ascii", errors="replace") + "Re: x" + padding.decode("ascii")
+    assert summarise(parse_message(raw)).subject == expected
+
+
+@pytest.mark.parametrize("prefix", [b"", b"\xff "])
+def test_read_operations_preserve_oversized_encoded_subject(prefix: bytes) -> None:
+    subject = prefix + b"=?utf-8?q?Re=3A_x?=" + b"a" * 8192 + b"\fend"
+    raw = f"Message-ID: {ROOT}\r\nFrom: reporter@example.org\r\nSubject: ".encode("ascii")
+    raw += subject + b"\r\n\r\nbody"
+    box = FakeMailbox.seed(INBOX=[raw], Drafts=[raw], Sent=[raw])
+    config = make_config()
+    expected = subject.decode("ascii", errors="replace").replace("\f", " ")
+    assert list_recent_threads(box, config, since_days=90)[0]["subject"] == expected
+    assert read_thread(box, config, ROOT, since_days=90)["subject"] == expected
+    assert list_drafts(box, config, ROOT, since_days=90)[0]["subject"] == expected
+    assert list_sent_since(box, config, ROOT, since_days=90)[0]["subject"] == expected
+
+
+@pytest.mark.parametrize("separator", [b"\v", b"\f", b"\x1c", b"\x1d", b"\x1e", b"\v\f\x1c\x1d\x1e"])
+def test_raw_separators_next_to_encoded_words_preserve_word_boundaries(separator: bytes) -> None:
+    raw = b"Subject: Re: x" + separator + b"=?utf-8?q?y?=\r\n\r\n"
+    assert summarise(parse_message(raw)).subject == "Re: x y"
+
+
+def test_utf8_bytes_split_across_adjacent_encoded_words() -> None:
+    raw = b"Subject: =?utf-8?q?=C3?= =?utf-8?q?=A9?=\r\n\r\n"
+    assert summarise(parse_message(raw)).subject == "\u00e9"
 
 
 @pytest.mark.parametrize(("encoded", "character"), [(b"=00", "\x00"), (b"=1B", "\x1b")])
