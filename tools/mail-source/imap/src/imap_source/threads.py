@@ -29,6 +29,7 @@ headers are only parsed into identifiers and dates, never interpreted.
 from __future__ import annotations
 
 import email.message
+import email.policy
 import email.utils
 import re
 from dataclasses import dataclass
@@ -85,6 +86,9 @@ def summarise(message: email.message.Message) -> ThreadPosition:
         display, address = email.utils.parseaddr(str(from_header))
         from_address = address or display or None
     subject = str(message.get("Subject", "") or "")
+    subject = str(email.policy.default.header_fetch_parse("Subject", subject))
+    # Encoded words can themselves decode to line breaks.
+    subject = re.sub(r"[\r\n]+", " ", subject)
     return ThreadPosition(
         message_id=normalise_message_id(message.get("Message-ID")),
         references=tuple(chain),
