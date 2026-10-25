@@ -56,7 +56,7 @@ def _normalise_subject(value: str) -> str:
         try:
             pieces = email.header.decode_header(unfolded)
         except email.errors.HeaderParseError:
-            return _SUBJECT_BREAKS.sub(" ", unfolded)
+            return unfolded
         decoded_parts: list[str] = []
         for part, charset in pieces:
             if isinstance(part, bytes):

@@ -329,6 +329,65 @@ def test_read_operations_preserve_oversized_encoded_subject(prefix: bytes) -> No
     assert list_sent_since(box, config, ROOT, since_days=90)[0]["subject"] == expected
 
 
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        pytest.param(b"=?utf-8?q?x=0D=0ABcc:_evil@example.org?=", id="encoded-crlf"),
+        pytest.param(b"=?utf-8?q?A=E2=80=A8B?=", id="encoded-ls"),
+        pytest.param(b"=?utf-8?q?A=0BB?=", id="encoded-vt"),
+    ],
+)
+def test_oversized_subject_preserves_draft_structure(
+    encoded: bytes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    padding = b"a" * (8193 - len(encoded) - 1)
+    raw = (
+        f"Message-ID: {ROOT}\r\nFrom: reporter@example.org\r\n"
+        "Date: Mon, 21 Sep 2026 10:00:00 +0000\r\nSubject: "
+    ).encode("ascii")
+    raw += encoded + b" " + padding + b"\r\n\r\nexternal content\n"
+    box = FakeMailbox.seed(
+        INBOX=[
+            raw,
+            build_message(
+                REPLY,
+                "Re: report",
+                "peer@example.org",
+                references=ROOT,
+                in_reply_to=ROOT,
+                date="Tue, 22 Sep 2026 09:00:00 +0000",
+            ),
+        ],
+        Drafts=[],
+    )
+    config = make_config()
+    body = "Thanks for the report.\n"
+    assert (
+        run_operation(
+            lambda: create_draft(
+                box, config, ROOT, body=body, to=[], cc=["triage@example.org"], from_address=None
+            )
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    result = json.loads(captured.out)
+    assert len(box.folders["Drafts"]) == 1
+    parsed = email.message_from_bytes(box.folders["Drafts"][result["draft_uid"]], policy=email.policy.default)
+    assert len(parsed.get_all("Subject", [])) == 1
+    assert parsed["Bcc"] is None
+    assert str(parsed["Subject"]) == result["subject"]
+    assert str(parsed["Subject"]).endswith(padding.decode("ascii"))
+    assert parsed["From"] == config.user
+    assert parsed["To"] == "reporter@example.org"
+    assert parsed["Cc"] == "triage@example.org"
+    assert parsed["In-Reply-To"] == REPLY
+    assert parsed["References"] == f"{ROOT} {REPLY}"
+    assert parsed.get_content() == body
+    assert result["sent"] is False
+
+
 @pytest.mark.parametrize("separator", [b"\v", b"\f", b"\x1c", b"\x1d", b"\x1e", b"\v\f\x1c\x1d\x1e"])
 def test_raw_separators_next_to_encoded_words_preserve_word_boundaries(separator: bytes) -> None:
     raw = b"Subject: Re: x" + separator + b"=?utf-8?q?y?=\r\n\r\n"
@@ -338,6 +397,11 @@ def test_raw_separators_next_to_encoded_words_preserve_word_boundaries(separator
 def test_utf8_bytes_split_across_adjacent_encoded_words() -> None:
     raw = b"Subject: =?utf-8?q?=C3?= =?utf-8?q?=A9?=\r\n\r\n"
     assert summarise(parse_message(raw)).subject == "\u00e9"
+
+
+def test_malformed_base64_fallback_preserves_text_and_word_boundaries() -> None:
+    raw = b"Subject: Re: x\f=?utf-8?b?A?=\r\n\r\n"
+    assert summarise(parse_message(raw)).subject == "Re: x =?utf-8?b?A?="
 
 
 @pytest.mark.parametrize(("encoded", "character"), [(b"=00", "\x00"), (b"=1B", "\x1b")])
