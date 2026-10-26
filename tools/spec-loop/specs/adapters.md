@@ -241,21 +241,12 @@ by swapping the adapter, not the skill.
   Coverage is not complete or selectable as an archive backend yet.
   `DISCOURSE_API_KEY` + `DISCOURSE_API_USERNAME` cover authorised private reads
   and are only sent within the `DISCOURSE_URL` origin and configured path.
-  `topic list --category <slug|parent/child|id> [--since <ISO-8601>] [--limit N]`
-  includes subcategories in pinned/descending activity order, preserved across pages.
-  IDs work with empty/unusable slugs; catalog references must identify a top-level
-  slug or complete ancestry path, with no guessing from a partial catalog.
-  Since is inclusive on `bumped_at`; date-only inputs mean midnight UTC,
-  timestamps require a timezone and support at most microsecond precision.
-  Summaries reuse `thread_summary` fields with separate `bumped_at` metadata;
-  missing/null `last_posted_at` remains null and never falls back to activity time.
-  Default limit is 100; filtering precedes deduplication and only an additional
-  unique match proves `truncated: true`.
-  With since, an older topic explicitly marked non-pinned ends the scan;
-  old pinned topics and absent pin flags do not establish that boundary.
-  Received pages and continuation scope/progress are validated before successful output;
-  malformed responses and pagination that cannot progress fail without partial success.
-  This does not implement the archive contract's newest-message ordering or contract verbs.
+  `topic list --category <id|slug|url|slug/.../id> [--since <ISO-8601>] [--limit N]` includes subcategories.
+  IDs and same-forum ID-bearing references read category metadata directly; bare slugs match only catalog roots, with an ID fallback when unresolved.
+  Results preserve pinned/descending `bumped_at` order; since is inclusive, dates mean midnight UTC and timestamps require a timezone with at most microsecond precision.
+  Summaries reuse `thread_summary` fields plus activity metadata; `last_message_date` maps only `last_posted_at`, preserving missing/null without fallback.
+  Pinned topics count toward the positive limit (default 100); only an extra unique match proves truncation, and an older explicitly non-pinned topic ends a since scan.
+  Received pages are strictly validated; malformed data or failed requests produce no partial output. Lists are not consistent snapshots and have no pagination budget.
   Only GET requests are permitted. Search,
   user activity, guarded writes and the remaining mail-archive verbs are
   tracked in #307.

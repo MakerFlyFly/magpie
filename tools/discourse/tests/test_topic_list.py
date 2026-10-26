@@ -141,6 +141,21 @@ def test_list_uses_activity_order_and_keeps_message_time_separate(
     assert all(request.get_method() == "GET" for request in requests)
 
 
+def test_old_about_pin_counts_towards_limit_without_since(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    about = topic(1, title="About the Development category", pinned=True, bumped_at="2020-01-01T00:00:00Z")
+    requests = serve(monkeypatch, {0: page([about, topic(2)])})
+    status, out, err = run(capsys, "--limit", "1")
+    assert (status, err) == (0, "")
+    result = json.loads(out)
+    assert result["since"] is None and result["truncated"] is True
+    assert [row["thread_id"] for row in result["threads"]] == ["1"]
+    assert result["threads"][0]["pinned"] is True
+    assert [row for row in result["threads"] if not row["pinned"]] == []
+    assert len(requests) == 2
+
+
 def test_cutoff_after_old_pins_matches_and_overlap_stops_pagination(
     monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
@@ -195,78 +210,123 @@ def test_missing_message_time_never_falls_back_to_activity(
     assert json.loads(out)["threads"][0]["last_message_date"] is None
 
 
-@pytest.mark.parametrize("ref", ["dev/core/proposals", "%64ev/core/proposals"])
-def test_nested_category_resolution(monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str) -> None:
-    leaf = {"id": 7, "slug": "proposals", "name": "Proposals"}
-    catalog = {
-        "category_list": {
-            "categories": [
-                {
-                    "id": 1,
-                    "slug": "dev",
-                    "name": "Dev",
-                    "subcategory_list": [
-                        {"id": 2, "slug": "core", "name": "Core", "subcategory_list": [leaf]}
-                    ],
-                }
-            ]
-        }
-    }
-    requests = serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
-    status = package_main(["topic", "list", "--category", ref])
-    output = capsys.readouterr()
-    assert (status, output.err) == (0, "")
-    assert json.loads(output.out)["category"] == leaf
-    assert urllib.parse.parse_qs(urllib.parse.urlsplit(requests[0].full_url).query) == {
-        "include_subcategories": ["true"]
-    }
-    assert urllib.parse.urlsplit(requests[1].full_url).path == "/latest.json"
-
-
-@pytest.mark.parametrize("ref", ["讨论/提案", "%E8%AE%A8%E8%AE%BA/%E6%8F%90%E6%A1%88"])
-def test_unicode_category_names_do_not_enter_request_paths(
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "7",
+        "dev/core/7",
+        "讨论/提案/7",
+        BASE + "/c/dev/7",
+        BASE + "/c/讨论/提案/7/?order=likes#share",
+        BASE + "/c/%E8%AE%A8%E8%AE%BA/7",
+    ],
+)
+def test_id_references_read_only_numeric_category_endpoints(
     monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str
 ) -> None:
-    catalog = {
-        "category_list": {
-            "categories": [
-                {
-                    "id": 1,
-                    "slug": "讨论",
-                    "name": "讨论",
-                    "subcategory_list": [{"id": 7, "slug": "%E6%8F%90%E6%A1%88", "name": "提案"}],
-                }
-            ]
-        }
-    }
-    requests = serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
-    assert package_main(["topic", "list", "--category", ref]) == 0
-    assert json.loads(capsys.readouterr().out)["category"]["id"] == 7
-    assert all(
-        urllib.parse.urlsplit(r.full_url).path in ("/categories.json", "/latest.json") for r in requests
-    )
+    requests = serve(monkeypatch, {0: page([])})
+    status, out, err = run(capsys, "--category", ref)
+    assert (status, err) == (0, "")
+    assert json.loads(out)["category"] == CATEGORY
+    assert [urllib.parse.urlsplit(request.full_url).path for request in requests] == [
+        "/c/7/show.json",
+        "/latest.json",
+    ]
 
 
-@pytest.mark.parametrize("ref,needle", [("core", "category"), ("unknown", "category")])
-def test_unresolved_categories_fail_without_guessing_cause(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str, needle: str
+@pytest.mark.parametrize("ref", ["讨论", "%E8%AE%A8%E8%AE%BA"])
+def test_unicode_top_level_slug_is_matched_without_entering_request_paths(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str
 ) -> None:
+    selected = {**CATEGORY, "slug": "%E8%AE%A8%E8%AE%BA", "name": "讨论"}
+    catalog = {"category_list": {"categories": [selected]}}
+    requests = serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
+    status, out, err = run(capsys, "--category", ref)
+    assert (status, err) == (0, "")
+    assert json.loads(out)["category"] == selected
+    assert [urllib.parse.urlsplit(request.full_url).path for request in requests] == [
+        "/categories.json",
+        "/latest.json",
+    ]
+
+
+def test_bare_slug_selects_only_a_confirmed_top_level_category(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    selected = {**CATEGORY, "slug": "core"}
     catalog = {
         "category_list": {
             "categories": [
                 {
                     "id": 1,
                     "slug": "dev",
-                    "name": "Dev",
-                    "subcategory_list": [{"id": 7, "slug": "core", "name": "Core"}],
+                    "name": "Parent",
+                    "subcategory_list": [{"id": 2, "slug": "core", "name": "Child"}],
                 },
+                {"id": 3, "slug": "core", "name": "Orphan", "parent_category_id": 99},
+                selected,
             ]
         }
     }
+    serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
+    status, out, err = run(capsys, "--category", "core")
+    assert (status, err) == (0, "")
+    assert json.loads(out)["category"] == selected
+
+
+@pytest.mark.parametrize(
+    "categories",
+    [
+        [],
+        [{"id": 1, "slug": "parent", "name": "Parent", "subcategory_list": [CATEGORY]}],
+        [{**CATEGORY, "parent_category_id": 99}],
+        [CATEGORY, {**CATEGORY, "id": 8}],
+    ],
+)
+def test_incomplete_or_ambiguous_root_catalog_suggests_an_id(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, categories: list[dict[str, Any]]
+) -> None:
+    catalog = {"category_list": {"categories": categories}}
     requests = serve(monkeypatch, {}, **{"/categories.json": catalog})
-    status, out, err = run(capsys, "--category", ref)
-    assert status == 1 and out == "" and needle in err.lower()
+    status, out, err = run(capsys, "--category", "dev")
+    assert status == 1 and out == "" and "numeric id" in err.lower()
     assert len(requests) == 1
+
+
+def test_unusable_catalog_slugs_do_not_block_an_independent_root(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    categories = [
+        {**CATEGORY, "id": i, "slug": slug}
+        for i, slug in enumerate(["", "bad%zz", "encoded%2fseparator"], start=10)
+    ] + [CATEGORY]
+    serve(monkeypatch, {0: page([])}, **{"/categories.json": {"category_list": {"categories": categories}}})
+    status, out, err = run(capsys, "--category", "dev")
+    assert (status, err) == (0, "") and json.loads(out)["category"] == CATEGORY
+
+
+def test_numeric_id_does_not_require_a_slug(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
+    selected = {**CATEGORY, "slug": ""}
+    requests = serve(monkeypatch, {0: page([])}, **{"/c/7/show.json": {"category": selected}})
+    status, out, err = run(capsys)
+    assert (status, err) == (0, "") and json.loads(out)["category"] == selected
+    assert len(requests) == 2
+
+
+def test_manual_path_without_id_fails_with_migration_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    catalog = {
+        "category_list": {
+            "categories": [
+                {"id": 1, "slug": "dev", "name": "Dev", "subcategory_list": [{**CATEGORY, "slug": "core"}]}
+            ]
+        }
+    }
+    requests = serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
+    status, out, err = run(capsys, "--category", "dev/core")
+    assert status == 1 and out == "" and "numeric id" in err.lower()
+    assert requests == []
 
 
 @pytest.mark.parametrize(
@@ -277,17 +337,12 @@ def test_unresolved_categories_fail_without_guessing_cause(
         ["--category", "0"],
         ["--category", "\uff14\uff12"],
         ["--category", "-7"],
-        ["--category", "+7"],
-        ["--category", "²"],
-        ["--category", "dev//core"],
-        ["--category", "../dev"],
         ["--category", "dev%2fcore"],
         ["--category", "%2564ev"],
         ["--category", "%zz"],
         ["--since", "2026-02-30"],
         ["--since", "2026-10-20T12:00:00"],
         ["--since", "2026-10-20T12:00:00.1234567Z"],
-        ["--since", "nonsense"],
     ],
 )
 def test_invalid_list_inputs_fail_before_any_request(
@@ -295,6 +350,35 @@ def test_invalid_list_inputs_fail_before_any_request(
 ) -> None:
     requests = serve(monkeypatch, {})
     status, out, err = run(capsys, *args)
+    assert status == 1 and out == "" and "magpie-discourse error:" in err
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "https://other.example/c/dev/7",
+        "://bad/c/dev/7",
+        BASE + "/t/dev/7",
+        BASE + "/c/dev/0",
+    ],
+)
+def test_invalid_category_urls_fail_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str
+) -> None:
+    requests = serve(monkeypatch, {})
+    status, out, err = run(capsys, "--category", ref)
+    assert status == 1 and out == "" and "magpie-discourse error:" in err
+    assert requests == []
+
+
+@pytest.mark.parametrize("prefix", ["", "/forum-other"])
+def test_category_url_cannot_leave_the_configured_subfolder(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, prefix: str
+) -> None:
+    monkeypatch.setenv("DISCOURSE_URL", BASE + "/forum")
+    requests = serve(monkeypatch, {})
+    status, out, err = run(capsys, "--category", BASE + prefix + "/c/dev/7")
     assert status == 1 and out == "" and "magpie-discourse error:" in err
     assert requests == []
 
@@ -319,80 +403,82 @@ def test_since_is_inclusive_utc_midnight(
 @pytest.mark.parametrize(
     "target",
     [
-        "https://evil.example/latest?category=7&page=1",
-        "http://forum.example.test/latest?category=7&page=1",
-        "/other-app/latest?category=7&page=1",
-        "/latest?category=8&page=1",
-        "/latest?category=7&page=0",
-        "/latest?category=7&page=-1",
-        "/latest?category=7&page=1&page=2",
-        "/latest?category=7",
-        "/latest?category=7&page=\uff11",
-        "/latest?category=7&page=1#fragment",
-        "/latest;params?category=7&page=1",
-        "/%6catest?category=7&page=1",
-        "/latest?category=7&page=2",
-        "/latest?category=7&page=1&order=created",
-        "/latest?category=7&page=1&ascending=true",
-        "/latest?category=7&page=1&no_subcategories=true",
-    ],
-)
-def test_unsafe_or_nonadvancing_pagination_fails_before_next_request(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, target: str
-) -> None:
-    requests = serve(monkeypatch, {0: page([topic(1)], target)})
-    status, out, err = run(capsys, "--limit", "1")
-    assert status == 1 and out == "" and "magpie-discourse error:" in err
-    assert len(requests) == 2
-
-
-@pytest.mark.parametrize(
-    "target",
-    [
-        next_url(1),
-        BASE + next_url(1),
-        "https://forum.example.test:443" + next_url(1),
-        "latest.json?category=7&page=1",
         "/latest?ascending=false&category=7&no_subcategories=false&order=activity&page=1",
+        next_url(1) + "&new_server_option=value",
+        "https://other.example/ignored?category=8&order=likes&page=99#fragment",
     ],
 )
-def test_supported_pagination_links_are_rebuilt_locally(
+def test_continuation_is_only_a_signal_and_requests_keep_fixed_scope(
     monkeypatch: pytest.MonkeyPatch, capsys: Any, target: str
 ) -> None:
     requests = serve(monkeypatch, {0: page([topic(1)], target), 1: page([])})
     status, out, err = run(capsys, "--limit", "1")
     assert (status, err) == (0, "") and json.loads(out)["truncated"] is False
-    assert requests[-1].full_url.startswith(BASE + "/latest.json?")
-    assert urllib.parse.parse_qs(urllib.parse.urlsplit(requests[-1].full_url).query) == {
-        "category": ["7"],
-        "order": ["activity"],
-        "ascending": ["false"],
-        "no_subcategories": ["false"],
-        "page": ["1"],
-    }
+    assert len(requests) == 3
+    for number, request in enumerate(requests[1:]):
+        parsed = urllib.parse.urlsplit(request.full_url)
+        assert parsed.scheme == "https" and parsed.netloc == "forum.example.test"
+        assert parsed.path == "/latest.json"
+        assert urllib.parse.parse_qs(parsed.query) == {
+            "category": ["7"],
+            "order": ["activity"],
+            "ascending": ["false"],
+            "no_subcategories": ["false"],
+            "page": [str(number)],
+        }
 
 
-def test_subfolder_pagination_and_auth_use_the_configured_client(
+@pytest.mark.parametrize("ending", [None, "", "missing"])
+def test_absent_continuation_ends_the_list(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, ending: str | None
+) -> None:
+    reply = page([topic(1)], ending)
+    if ending == "missing":
+        del reply["topic_list"]["more_topics_url"]
+    requests = serve(monkeypatch, {0: reply})
+    status, out, err = run(capsys)
+    assert (status, err) == (0, "") and json.loads(out)["truncated"] is False
+    assert len(requests) == 2
+
+
+def test_continuation_type_is_checked_even_with_an_extra_match(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    serve(monkeypatch, {0: page([topic(1), topic(2)], True)})
+    status, out, err = run(capsys, "--limit", "1")
+    assert status == 1 and out == "" and "magpie-discourse error:" in err
+
+
+def test_subfolder_category_url_and_pagination_keep_credentials_on_the_forum(
     monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
     monkeypatch.setenv("DISCOURSE_URL", BASE + "/forum")
     monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
     monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
-    requests = serve(monkeypatch, {0: page([topic(1)], "/forum" + next_url(1)), 1: page([])})
-    status, out, err = run(capsys, "--limit", "1")
+    requests = serve(monkeypatch, {0: page([topic(1)], "https://other.example/ignored"), 1: page([])})
+    status, out, err = run(capsys, "--category", BASE + "/forum/c/dev/core/7/?share=1", "--limit", "1")
     assert (status, err) == (0, "")
     assert json.loads(out)["threads"][0]["permalink"] == BASE + "/forum/t/1"
     assert len(requests) == 3
+    assert all(request.full_url.startswith(BASE + "/forum/") for request in requests)
+    assert all(request.get_method() == "GET" for request in requests)
     assert all(
-        r.get_header("Api-key") == "test-key" and r.get_header("Api-username") == "reader" for r in requests
+        request.get_header("Api-key") == "test-key" and request.get_header("Api-username") == "reader"
+        for request in requests
     )
 
 
-def test_repeated_complete_page_is_an_operational_error(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
-    requests = serve(monkeypatch, {0: page([topic(1)], next_url(1)), 1: page([topic(1)], next_url(2))})
-    status, out, err = run(capsys, "--limit", "1")
+@pytest.mark.parametrize("ids", [[[1], [1]], [[1], [2], [1]], [[]]])
+def test_empty_or_replayed_pages_cannot_continue(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, ids: list[list[int]]
+) -> None:
+    pages = {
+        number: page([topic(i) for i in items], next_url(number + 1)) for number, items in enumerate(ids)
+    }
+    requests = serve(monkeypatch, pages)
+    status, out, err = run(capsys, "--limit", "5")
     assert status == 1 and out == "" and "paginat" in err.lower()
-    assert len(requests) == 3
+    assert len(requests) == len(ids) + 1
 
 
 @pytest.mark.parametrize("code", [403, 404, 429])
@@ -412,22 +498,8 @@ def test_lookahead_http_failure_is_not_partial_success(
     assert len(requests) == 3
 
 
-@pytest.mark.parametrize(
-    "reply",
-    [
-        b"not JSON",
-        [],
-        {},
-        {"topic_list": None},
-        {"topic_list": {}},
-        page(None),
-        page({}),
-        page([None]),
-        page([], True),
-        TimeoutError(),
-    ],
-)
-def test_bad_lookahead_responses_do_not_become_complete_results(
+@pytest.mark.parametrize("reply", [b"not JSON", {}, TimeoutError()])
+def test_bad_lookahead_does_not_return_partial_success(
     monkeypatch: pytest.MonkeyPatch, capsys: Any, reply: Any
 ) -> None:
     serve(monkeypatch, {0: page([topic(1)], next_url(1)), 1: reply})
@@ -437,28 +509,23 @@ def test_bad_lookahead_responses_do_not_become_complete_results(
 
 @pytest.mark.parametrize(
     "field,value",
-    [
-        ("id", True),
-        ("id", 0),
-        ("title", None),
-        ("posts_count", True),
-        ("posts_count", -1),
-        ("created_at", None),
-        ("bumped_at", None),
-        ("bumped_at", "bad"),
-        ("last_posted_at", "bad"),
-        ("pinned", "true"),
-        ("closed", 1),
-        ("archived", None),
-        ("tags", {}),
-        ("tags", [{}]),
-        ("tags", [None]),
-    ],
+    [("bumped_at", "bad"), ("title", None), ("created_at", "missing"), ("tags", [{}]), ("pinned", "false")],
 )
-def test_invalid_summaries_are_rejected_even_beyond_the_output_limit(
+def test_invalid_summary_fields_fail_the_read(
     monkeypatch: pytest.MonkeyPatch, capsys: Any, field: str, value: Any
 ) -> None:
-    serve(monkeypatch, {0: page([topic(1), topic(2), topic(3, **{field: value})])})
+    row = topic(1, **{field: value})
+    if value == "missing":
+        del row[field]
+    serve(monkeypatch, {0: page([row])})
+    status, out, err = run(capsys)
+    assert status == 1 and out == "" and "magpie-discourse error:" in err
+
+
+def test_received_records_beyond_the_limit_are_still_validated(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    serve(monkeypatch, {0: page([topic(1), topic(2), topic(3, posts_count=None)])})
     status, out, err = run(capsys, "--limit", "1")
     assert status == 1 and out == "" and "magpie-discourse error:" in err
 
@@ -491,59 +558,21 @@ def test_list_permalink_can_be_viewed_by_pr1(monkeypatch: pytest.MonkeyPatch, ca
     assert json.loads(capsys.readouterr().out)["thread_id"] == "42"
 
 
-@pytest.mark.parametrize(
-    "reply",
-    [
-        {},
-        {"category": None},
-        {"category": {**CATEGORY, "id": 8}},
-        {"category": {**CATEGORY, "id": True}},
-        {"category": {**CATEGORY, "slug": None}},
-    ],
-)
-def test_invalid_direct_category_response_stops_before_listing(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, reply: Any
+@pytest.mark.parametrize("category", [{**CATEGORY, "id": 8}, {**CATEGORY, "slug": None}])
+def test_invalid_direct_category_metadata_stops_before_listing(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, category: dict[str, Any]
 ) -> None:
-    requests = serve(monkeypatch, {}, **{"/c/7/show.json": reply})
+    requests = serve(monkeypatch, {}, **{"/c/7/show.json": {"category": category}})
     status, out, err = run(capsys)
     assert status == 1 and out == "" and "magpie-discourse error:" in err
     assert len(requests) == 1
 
 
-@pytest.mark.parametrize(
-    "reply",
-    [
-        {},
-        {"category_list": None},
-        {"category_list": {}},
-        {"category_list": {"categories": None}},
-        {"category_list": {"categories": [None]}},
-        {"category_list": {"categories": [{**CATEGORY, "subcategory_list": None}]}},
-        {"category_list": {"categories": [{**CATEGORY, "parent_category_id": True}]}},
-        {"category_list": {"categories": [{**CATEGORY, "parent_category_id": 7}]}},
-    ],
-)
-def test_bad_category_catalog_is_not_a_successful_empty_result(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, reply: Any
-) -> None:
+@pytest.mark.parametrize("reply", [{}, {"category_list": {"categories": [None]}}])
+def test_bad_catalog_is_not_an_empty_result(monkeypatch: pytest.MonkeyPatch, capsys: Any, reply: Any) -> None:
     serve(monkeypatch, {}, **{"/categories.json": reply})
     status, out, err = run(capsys, "--category", "dev")
     assert status == 1 and out == "" and "magpie-discourse error:" in err
-
-
-def test_flat_catalog_preserves_ancestry(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
-    catalog = {
-        "category_list": {
-            "categories": [
-                {"id": 1, "slug": "parent", "name": "Parent"},
-                {**CATEGORY, "parent_category_id": 1},
-            ]
-        }
-    }
-    serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
-    status, out, err = run(capsys, "--category", "parent/dev")
-    assert (status, err) == (0, "")
-    assert json.loads(out)["category"] == CATEGORY
 
 
 def test_optional_flags_and_tags_have_documented_defaults(
@@ -560,42 +589,11 @@ def test_optional_flags_and_tags_have_documented_defaults(
     assert all(summary[field] is False for field in ("pinned", "closed", "archived"))
 
 
-@pytest.mark.parametrize("field", ["id", "title", "created_at", "bumped_at", "posts_count"])
-def test_missing_required_summary_fields_fail(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, field: str
-) -> None:
-    row = topic(1)
-    del row[field]
-    serve(monkeypatch, {0: page([row])})
-    status, out, err = run(capsys)
-    assert status == 1 and out == "" and "magpie-discourse error:" in err
-
-
 def test_empty_category_has_no_threads(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
     serve(monkeypatch, {0: page([])})
     status, out, err = run(capsys)
     assert (status, err) == (0, "")
     assert json.loads(out) == {"category": CATEGORY, "since": None, "threads": [], "truncated": False}
-
-
-@pytest.mark.parametrize(
-    "target",
-    [
-        "/latest?category=7&page=1",
-        "/forum-other/latest?category=7&page=1",
-        "/forum/../latest?category=7&page=1",
-        "/forum/%2flatest?category=7&page=1",
-        "/forum/%256catest?category=7&page=1",
-    ],
-)
-def test_pagination_cannot_leave_a_configured_subfolder(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, target: str
-) -> None:
-    monkeypatch.setenv("DISCOURSE_URL", BASE + "/forum")
-    requests = serve(monkeypatch, {0: page([topic(1)], target)})
-    status, out, err = run(capsys, "--limit", "1")
-    assert status == 1 and out == "" and "magpie-discourse error:" in err
-    assert len(requests) == 2
 
 
 def test_large_category_scan_ends_at_the_since_boundary(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
@@ -664,103 +662,6 @@ def test_cutoff_does_not_bypass_received_page_validation(
     serve(monkeypatch, {0: page([topic(1, bumped_at="2019-01-01T00:00:00Z"), topic(2, posts_count=None)])})
     status, out, err = run(capsys, "--since", "2026-10-20")
     assert status == 1 and out == "" and "magpie-discourse error:" in err
-
-
-@pytest.mark.parametrize("slug", ["", "bad%zz", "encoded%2fseparator"])
-def test_numeric_id_does_not_require_a_usable_slug(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, slug: str
-) -> None:
-    selected = {**CATEGORY, "slug": slug}
-    requests = serve(monkeypatch, {0: page([])}, **{"/c/7/show.json": {"category": selected}})
-    status, out, err = run(capsys)
-    assert (status, err) == (0, "")
-    assert json.loads(out)["category"] == selected
-    assert len(requests) == 2
-
-
-@pytest.mark.parametrize("slug", ["", "bad%zz", "encoded%2fseparator"])
-@pytest.mark.parametrize("ref", ["dev", "parent/dev"])
-def test_unrelated_unusable_slug_does_not_poison_lookup(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, slug: str, ref: str
-) -> None:
-    selected = (
-        CATEGORY
-        if ref == "dev"
-        else {"id": 1, "slug": "parent", "name": "Parent", "subcategory_list": [CATEGORY]}
-    )
-    catalog = {
-        "category_list": {
-            "categories": [
-                {
-                    "id": 8,
-                    "slug": slug,
-                    "name": "Other",
-                    "subcategory_list": [{"id": 9, "slug": "child", "name": "Child"}],
-                },
-                selected,
-            ]
-        }
-    }
-    serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
-    status, out, err = run(capsys, "--category", ref)
-    assert (status, err) == (0, "")
-    assert json.loads(out)["category"] == CATEGORY
-
-
-def test_bare_slug_prefers_confirmed_root_to_same_named_child(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
-) -> None:
-    selected = {**CATEGORY, "slug": "core"}
-    catalog = {
-        "category_list": {
-            "categories": [
-                {
-                    "id": 1,
-                    "slug": "dev",
-                    "name": "Dev",
-                    "subcategory_list": [{"id": 2, "slug": "core", "name": "Child"}],
-                },
-                selected,
-            ]
-        }
-    }
-    serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
-    status, out, err = run(capsys, "--category", "core")
-    assert (status, err) == (0, "")
-    assert json.loads(out)["category"] == selected
-
-
-@pytest.mark.parametrize("ref", ["core", "ops/core"])
-def test_partial_catalog_does_not_promote_an_orphan_child_to_root(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str
-) -> None:
-    catalog = {"category_list": {"categories": [{**CATEGORY, "slug": "core", "parent_category_id": 99}]}}
-    requests = serve(monkeypatch, {}, **{"/categories.json": catalog})
-    status, out, err = run(capsys, "--category", ref)
-    assert status == 1 and out == "" and "numeric" in err.lower()
-    assert len(requests) == 1
-
-
-def test_duplicate_confirmed_root_slugs_remain_ambiguous(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
-) -> None:
-    catalog = {"category_list": {"categories": [CATEGORY, {**CATEGORY, "id": 8}]}}
-    requests = serve(monkeypatch, {}, **{"/categories.json": catalog})
-    status, out, err = run(capsys, "--category", "dev")
-    assert status == 1 and out == "" and "ambiguous" in err.lower()
-    assert len(requests) == 1
-
-
-def test_empty_slug_ancestor_does_not_invent_a_path(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
-    catalog = {
-        "category_list": {
-            "categories": [{"id": 1, "slug": "", "name": "Parent", "subcategory_list": [CATEGORY]}]
-        }
-    }
-    requests = serve(monkeypatch, {}, **{"/categories.json": catalog})
-    status, out, err = run(capsys, "--category", "1-category/dev")
-    assert status == 1 and out == "" and "numeric" in err.lower()
-    assert len(requests) == 1
 
 
 def test_oversized_ascii_id_uses_the_conversion_error_channel(

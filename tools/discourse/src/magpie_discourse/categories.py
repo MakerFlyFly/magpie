@@ -16,15 +16,16 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Resolve category references without using a slug in an HTTP request path."""
+"""Resolve category references without requesting user-supplied category URLs."""
 
 from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
+from urllib.request import Request
 
-from magpie_discourse.client import DiscourseConfig, DiscourseError, get_json
+from magpie_discourse.client import DiscourseConfig, DiscourseError, SameOriginRedirectHandler, get_json
 
 
 def _slug(value: str) -> str:
@@ -59,8 +60,19 @@ def _category(raw: Any) -> dict[str, Any]:
 
 
 def resolve_category(config: DiscourseConfig, ref: str) -> dict[str, Any]:
-    """Resolve an ID, top-level catalog slug or full catalog slug path."""
+    """Resolve an ID, an ID-bearing reference or a top-level catalog slug."""
     value = ref.strip()
+    if "/" in value:
+        target = value if "://" in value else f"{config.base_url}/c/{value}"
+        try:
+            SameOriginRedirectHandler(config.base_url).check_request(Request(target, method="GET"))
+        except ValueError as exc:
+            raise DiscourseError("Invalid category URL") from exc
+        path = urlsplit(target).path[len(urlsplit(config.base_url).path) :]
+        match = re.fullmatch(r"/c/(?:[^/]+/)*([0-9]+)/?", path)
+        if not match:
+            raise DiscourseError("Category path must end in a numeric id; use a category URL or numeric id")
+        value = match[1]
     if value.startswith(("+", "-")) and value[1:].isdigit():
         raise DiscourseError("Category id must be a positive integer using ASCII digits")
     if value.isdigit():
@@ -77,57 +89,27 @@ def resolve_category(config: DiscourseConfig, ref: str) -> dict[str, Any]:
             raise DiscourseError("Discourse returned a different category id")
         return category
 
-    wanted = tuple(_slug(part) for part in value.split("/"))
-    payload = get_json(config, "/categories.json", {"include_subcategories": "true"})
+    wanted = _slug(value)
+    payload = get_json(config, "/categories.json")
     envelope = payload.get("category_list")
     if not isinstance(envelope, dict) or not isinstance(envelope.get("categories"), list):
         raise DiscourseError("Discourse returned an invalid category collection")
-    nodes: dict[int, tuple[dict[str, Any], int | None]] = {}
-
-    def visit(items: list[Any], parent: int | None = None) -> None:
-        for raw in items:
-            category = _category(raw)
-            parent_id = raw.get("parent_category_id", parent)
-            if parent_id is not None and (type(parent_id) is not int or parent_id < 1):
-                raise DiscourseError("Discourse returned an invalid parent category id")
-            if parent is not None and parent_id != parent:
-                raise DiscourseError("Discourse returned inconsistent category ancestry")
-            entry = (category, parent_id)
-            category_id = category["id"]
-            if category_id in nodes and nodes[category_id] != entry:
-                raise DiscourseError("Discourse returned conflicting category metadata")
-            nodes[category_id] = entry
-            children = raw.get("subcategory_list", [])
-            if not isinstance(children, list):
-                raise DiscourseError("Discourse returned an invalid subcategory collection")
-            visit(children, category_id)
-
-    visit(envelope["categories"])
-
-    def path_for(category_id: int, ancestors: frozenset[int] = frozenset()) -> tuple[str, ...] | None:
-        if category_id in ancestors:
-            raise DiscourseError("Discourse returned cyclic category ancestry")
-        category, parent_id = nodes[category_id]
-        try:
-            own = (_slug(category["slug"]),)
-        except DiscourseError:
-            return None  # Unusable catalog slugs do not invalidate independent selections.
-        if parent_id is None:
-            return own
-        if parent_id not in nodes:
-            return None  # A partial catalog cannot establish this category's full path.
-        parent_path = path_for(parent_id, ancestors | {category_id})
-        return parent_path + own if parent_path is not None else None
-
     matches = []
-    for category_id, (category, _) in nodes.items():
-        path = path_for(category_id)
-        if path == wanted:
+    for raw in envelope["categories"]:
+        category = _category(raw)
+        parent_id = raw.get("parent_category_id")
+        if parent_id is not None:
+            if type(parent_id) is not int or parent_id < 1:
+                raise DiscourseError("Discourse returned an invalid parent category id")
+            continue
+        try:
+            slug = _slug(category["slug"])
+        except DiscourseError:
+            continue
+        if slug == wanted:
             matches.append(category)
     if len(matches) > 1:
-        raise DiscourseError("Category slug is ambiguous; use a full parent/child path or numeric id")
+        raise DiscourseError("Category slug is ambiguous; use a numeric id")
     if not matches:
-        raise DiscourseError(
-            "Cannot resolve category from the returned catalog; use a full parent/child path or numeric id"
-        )
+        raise DiscourseError("Cannot resolve top-level category from the returned catalog; use a numeric id")
     return matches[0]

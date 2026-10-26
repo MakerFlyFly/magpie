@@ -67,10 +67,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "a longer topic is returned with truncated: true.",
     )
     topic_list = topic_subparsers.add_parser(
-        "list", help="List recent activity in a category and its subcategories."
+        "list", help="List category topics by latest activity, optionally since a cutoff."
     )
     topic_list.add_argument(
-        "--category", required=True, help="Category id, top-level slug or full parent/child path."
+        "--category", required=True, help="Category id, top-level slug, category URL or slug/.../id."
     )
     topic_list.add_argument(
         "--since", help="Inclusive activity cutoff: UTC date or ISO-8601 timestamp with timezone."
