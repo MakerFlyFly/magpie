@@ -241,7 +241,24 @@ by swapping the adapter, not the skill.
   Coverage is not complete or selectable as an archive backend yet.
   `DISCOURSE_API_KEY` + `DISCOURSE_API_USERNAME` cover authorised private reads
   and are only sent within the `DISCOURSE_URL` origin and configured path.
-  Only GET requests are permitted. Topic list, search,
+  `topic list --category <slug|parent/child|id> [--since <ISO-8601>] [--limit N]`
+  includes subcategories and reads `/latest.json` using a numeric category,
+  explicit activity order and descending sorting.
+  IDs use the category show endpoint; slugs and ancestry use the returned visible catalog.
+  Since is inclusive on `bumped_at`; date-only inputs mean midnight UTC,
+  timestamps require a timezone and support at most microsecond precision.
+  Summaries reuse `thread_summary` fields with separate `bumped_at` metadata;
+  missing/null `last_posted_at` remains null and never falls back to activity time.
+  Filtering precedes deduplication, retaining the first matching record in server order.
+  Default limit is 100; the command scans for one extra unique match before setting
+  `truncated: true`, rather than inferring more matches from a continuation link.
+  Old pinned items or pages without matches do not stop pagination.
+  Continuations must preserve origin, forum path, latest-list scope and advancing page;
+  requests are constructed locally, and malformed/cyclic links or repeated complete pages
+  with another continuation fail without successful partial output.
+  The complete received summary page is validated, including records outside the output cap.
+  This does not implement the archive contract's newest-message ordering or contract verbs.
+  Only GET requests are permitted. Search,
   user activity, guarded writes and the remaining mail-archive verbs are
   tracked in #307.
 - `tools/forgejo/` — doc-only Forgejo / Gitea adapter (#1469, part of
