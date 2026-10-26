@@ -73,7 +73,7 @@ def _summary(raw: Any, config: DiscourseConfig) -> tuple[dict[str, Any], datetim
         raise DiscourseError("Discourse returned invalid topic tags")
     names = []
     for tag in tags:
-        name = tag.get("name") or tag.get("slug") if isinstance(tag, dict) else tag
+        name = (tag.get("name") or tag.get("slug")) if isinstance(tag, dict) else tag
         if not isinstance(name, str):
             raise DiscourseError("Discourse returned an invalid topic tag")
         names.append(name)
