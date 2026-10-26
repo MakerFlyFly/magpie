@@ -166,9 +166,10 @@ the stream; callers must not assume the last message has the latest date.
 
 `topic list --category <id|slug|url|slug/.../id> [--since <ISO-8601>] [--limit N]`
 returns `category: {id, slug, name}`, `since`, `threads` and `truncated`.
-Use a positive ASCII ID, top-level slug, same-forum `/c/.../ID` URL or `slug/.../ID`; subcategories are included.
+Use a positive ASCII ID, top-level slug, same-forum category URL, `/c/.../ID` path or `slug/.../ID`; subcategories are included.
+With a `/forum` base path, `/c/dev/7` and `/forum/c/dev/7` work; full URLs must include `/forum`.
 ID references work with empty slugs; catalog lookup can be incomplete, so use an ID if a top-level slug cannot be resolved.
-Manual paths without an ID are unsupported.
+Manual paths without an ID, list-view suffixes (`/none`, `/l/...`) and `.json` are unsupported.
 
 `--since` includes `bumped_at >= since`; dates mean midnight UTC, timestamps require a timezone and at most six fractional digits.
 `since` is normalized to UTC, or null when omitted; omitting it sets no time window.

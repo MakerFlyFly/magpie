@@ -215,6 +215,8 @@ def test_missing_message_time_never_falls_back_to_activity(
     [
         "7",
         "dev/core/7",
+        "/c/dev/7",
+        "/c/dev/7/",
         "讨论/提案/7",
         BASE + "/c/dev/7",
         BASE + "/c/讨论/提案/7/?order=likes#share",
@@ -358,6 +360,7 @@ def test_invalid_list_inputs_fail_before_any_request(
     "ref",
     [
         "https://other.example/c/dev/7",
+        "//evil.example/c/x/7",
         "://bad/c/dev/7",
         BASE + "/t/dev/7",
         BASE + "/c/dev/0",
@@ -372,13 +375,13 @@ def test_invalid_category_urls_fail_before_any_request(
     assert requests == []
 
 
-@pytest.mark.parametrize("prefix", ["", "/forum-other"])
+@pytest.mark.parametrize("ref", [BASE + "/c/dev/7", BASE + "/forum-other/c/dev/7", "/forum-other/c/dev/7"])
 def test_category_url_cannot_leave_the_configured_subfolder(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, prefix: str
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str
 ) -> None:
     monkeypatch.setenv("DISCOURSE_URL", BASE + "/forum")
     requests = serve(monkeypatch, {})
-    status, out, err = run(capsys, "--category", BASE + prefix + "/c/dev/7")
+    status, out, err = run(capsys, "--category", ref)
     assert status == 1 and out == "" and "magpie-discourse error:" in err
     assert requests == []
 
@@ -449,14 +452,15 @@ def test_continuation_type_is_checked_even_with_an_extra_match(
     assert status == 1 and out == "" and "magpie-discourse error:" in err
 
 
+@pytest.mark.parametrize("ref", [BASE + "/forum/c/dev/core/7/?share=1", "/forum/c/dev/7", "/c/dev/7"])
 def test_subfolder_category_url_and_pagination_keep_credentials_on_the_forum(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str
 ) -> None:
     monkeypatch.setenv("DISCOURSE_URL", BASE + "/forum")
     monkeypatch.setenv("DISCOURSE_API_KEY", "test-key")
     monkeypatch.setenv("DISCOURSE_API_USERNAME", "reader")
     requests = serve(monkeypatch, {0: page([topic(1)], "https://other.example/ignored"), 1: page([])})
-    status, out, err = run(capsys, "--category", BASE + "/forum/c/dev/core/7/?share=1", "--limit", "1")
+    status, out, err = run(capsys, "--category", ref, "--limit", "1")
     assert (status, err) == (0, "")
     assert json.loads(out)["threads"][0]["permalink"] == BASE + "/forum/t/1"
     assert len(requests) == 3
@@ -466,6 +470,17 @@ def test_subfolder_category_url_and_pagination_keep_credentials_on_the_forum(
         request.get_header("Api-key") == "test-key" and request.get_header("Api-username") == "reader"
         for request in requests
     )
+
+
+@pytest.mark.parametrize("suffix", ["/none", "/l/latest", ".json"])
+def test_category_view_suffixes_fail_with_a_clear_hint(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, suffix: str
+) -> None:
+    requests = serve(monkeypatch, {})
+    status, out, err = run(capsys, "--category", "/c/dev/7" + suffix)
+    assert status == 1 and out == "" and "not supported" in err
+    assert "/c/" in err and "numeric id" in err
+    assert requests == []
 
 
 @pytest.mark.parametrize("ids", [[[1], [1]], [[1], [2], [1]], [[]]])
