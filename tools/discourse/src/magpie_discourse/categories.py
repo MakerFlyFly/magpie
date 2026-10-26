@@ -63,15 +63,27 @@ def resolve_category(config: DiscourseConfig, ref: str) -> dict[str, Any]:
     """Resolve an ID, an ID-bearing reference or a top-level catalog slug."""
     value = ref.strip()
     if "/" in value:
-        target = value if "://" in value else f"{config.base_url}/c/{value}"
+        if value.startswith("//"):
+            raise DiscourseError("Category references starting with // are not supported")
+        base = urlsplit(config.base_url)
+        if value.startswith("/"):
+            prefix = (
+                f"{base.scheme}://{base.netloc}" if value.startswith(f"{base.path}/") else config.base_url
+            )
+            target = prefix + value
+        else:
+            target = value if "://" in value else f"{config.base_url}/c/{value}"
         try:
             SameOriginRedirectHandler(config.base_url).check_request(Request(target, method="GET"))
         except ValueError as exc:
             raise DiscourseError("Invalid category URL") from exc
-        path = urlsplit(target).path[len(urlsplit(config.base_url).path) :]
+        path = urlsplit(target).path[len(base.path) :]
         match = re.fullmatch(r"/c/(?:[^/]+/)*([0-9]+)/?", path)
         if not match:
-            raise DiscourseError("Category path must end in a numeric id; use a category URL or numeric id")
+            raise DiscourseError(
+                "Unsupported category reference; use /c/.../ID or a numeric id. "
+                "List-view suffixes and .json are not supported."
+            )
         value = match[1]
     if value.startswith(("+", "-")) and value[1:].isdigit():
         raise DiscourseError("Category id must be a positive integer using ASCII digits")
