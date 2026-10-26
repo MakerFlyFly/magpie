@@ -242,21 +242,19 @@ by swapping the adapter, not the skill.
   `DISCOURSE_API_KEY` + `DISCOURSE_API_USERNAME` cover authorised private reads
   and are only sent within the `DISCOURSE_URL` origin and configured path.
   `topic list --category <slug|parent/child|id> [--since <ISO-8601>] [--limit N]`
-  includes subcategories and reads `/latest.json` using a numeric category,
-  explicit activity order and descending sorting.
-  IDs use the category show endpoint; slugs and ancestry use the returned visible catalog.
+  includes subcategories in pinned/descending activity order, preserved across pages.
+  IDs work with empty/unusable slugs; catalog references must identify a top-level
+  slug or complete ancestry path, with no guessing from a partial catalog.
   Since is inclusive on `bumped_at`; date-only inputs mean midnight UTC,
   timestamps require a timezone and support at most microsecond precision.
   Summaries reuse `thread_summary` fields with separate `bumped_at` metadata;
   missing/null `last_posted_at` remains null and never falls back to activity time.
-  Filtering precedes deduplication, retaining the first matching record in server order.
-  Default limit is 100; the command scans for one extra unique match before setting
-  `truncated: true`, rather than inferring more matches from a continuation link.
-  Old pinned items or pages without matches do not stop pagination.
-  Continuations must preserve origin, forum path, latest-list scope and advancing page;
-  requests are constructed locally, and malformed/cyclic links or repeated complete pages
-  with another continuation fail without successful partial output.
-  The complete received summary page is validated, including records outside the output cap.
+  Default limit is 100; filtering precedes deduplication and only an additional
+  unique match proves `truncated: true`.
+  With since, an older topic explicitly marked non-pinned ends the scan;
+  old pinned topics and absent pin flags do not establish that boundary.
+  Received pages and continuation scope/progress are validated before successful output;
+  malformed responses and pagination that cannot progress fail without partial success.
   This does not implement the archive contract's newest-message ordering or contract verbs.
   Only GET requests are permitted. Search,
   user activity, guarded writes and the remaining mail-archive verbs are

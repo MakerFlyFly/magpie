@@ -55,12 +55,11 @@ def _category(raw: Any) -> dict[str, Any]:
         or not isinstance(raw.get("name"), str)
     ):
         raise DiscourseError("Discourse returned invalid category metadata")
-    _slug(raw["slug"])
     return {key: raw[key] for key in ("id", "slug", "name")}
 
 
 def resolve_category(config: DiscourseConfig, ref: str) -> dict[str, Any]:
-    """Resolve an ID, unique catalog slug or full catalog slug path."""
+    """Resolve an ID, top-level catalog slug or full catalog slug path."""
     value = ref.strip()
     if value.startswith(("+", "-")) and value[1:].isdigit():
         raise DiscourseError("Category id must be a positive integer using ASCII digits")
@@ -109,7 +108,10 @@ def resolve_category(config: DiscourseConfig, ref: str) -> dict[str, Any]:
         if category_id in ancestors:
             raise DiscourseError("Discourse returned cyclic category ancestry")
         category, parent_id = nodes[category_id]
-        own = (_slug(category["slug"]),)
+        try:
+            own = (_slug(category["slug"]),)
+        except DiscourseError:
+            return None  # Unusable catalog slugs do not invalidate independent selections.
         if parent_id is None:
             return own
         if parent_id not in nodes:
@@ -120,10 +122,12 @@ def resolve_category(config: DiscourseConfig, ref: str) -> dict[str, Any]:
     matches = []
     for category_id, (category, _) in nodes.items():
         path = path_for(category_id)
-        if (len(wanted) == 1 and _slug(category["slug"]) == wanted[0]) or path == wanted:
+        if path == wanted:
             matches.append(category)
     if len(matches) > 1:
         raise DiscourseError("Category slug is ambiguous; use a full parent/child path or numeric id")
     if not matches:
-        raise DiscourseError("Cannot resolve category from the returned catalog; try a numeric category id")
+        raise DiscourseError(
+            "Cannot resolve category from the returned catalog; use a full parent/child path or numeric id"
+        )
     return matches[0]

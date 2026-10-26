@@ -70,7 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "list", help="List recent activity in a category and its subcategories."
     )
     topic_list.add_argument(
-        "--category", required=True, help="Category id, unique slug or full parent/child path."
+        "--category", required=True, help="Category id, top-level slug or full parent/child path."
     )
     topic_list.add_argument(
         "--since", help="Inclusive activity cutoff: UTC date or ISO-8601 timestamp with timezone."

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -140,7 +141,7 @@ def test_list_uses_activity_order_and_keeps_message_time_separate(
     assert all(request.get_method() == "GET" for request in requests)
 
 
-def test_lookahead_skips_old_pins_duplicate_topics_and_empty_matches(
+def test_cutoff_after_old_pins_matches_and_overlap_stops_pagination(
     monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
     requests = serve(
@@ -148,15 +149,13 @@ def test_lookahead_skips_old_pins_duplicate_topics_and_empty_matches(
         {
             0: page([topic(1, pinned=True, bumped_at="2020-01-01T00:00:00Z"), topic(2)], next_url(1)),
             1: page([topic(2), topic(3, bumped_at="2020-01-01T00:00:00Z")], next_url(2)),
-            2: page([topic(4, bumped_at="2020-01-01T00:00:00Z")], next_url(3)),
-            3: page([topic(5)], next_url(4)),
         },
     )
     status, out, err = run(capsys, "--since", "2026-10-20", "--limit", "1")
     assert (status, err) == (0, "")
     assert [t["thread_id"] for t in json.loads(out)["threads"]] == ["2"]
-    assert json.loads(out)["truncated"] is True
-    assert len(requests) == 5  # category + four pages, no page after the extra match
+    assert json.loads(out)["truncated"] is False
+    assert len(requests) == 3  # category + two pages, stopping at an old non-pinned topic
 
 
 @pytest.mark.parametrize("tail", [[], [topic(1)], [topic(2, bumped_at="2020-01-01T00:00:00Z")]])
@@ -174,7 +173,7 @@ def test_filtering_precedes_deduplication(monkeypatch: pytest.MonkeyPatch, capsy
     serve(
         monkeypatch,
         {
-            0: page([topic(1, bumped_at="2020-01-01T00:00:00Z")], next_url(1)),
+            0: page([topic(1, pinned=True, bumped_at="2020-01-01T00:00:00Z")], next_url(1)),
             1: page([topic(1, title="New activity")]),
         },
     )
@@ -196,7 +195,7 @@ def test_missing_message_time_never_falls_back_to_activity(
     assert json.loads(out)["threads"][0]["last_message_date"] is None
 
 
-@pytest.mark.parametrize("ref", ["proposals", "dev/core/proposals", "%64ev/core/proposals"])
+@pytest.mark.parametrize("ref", ["dev/core/proposals", "%64ev/core/proposals"])
 def test_nested_category_resolution(monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str) -> None:
     leaf = {"id": 7, "slug": "proposals", "name": "Proposals"}
     catalog = {
@@ -248,7 +247,7 @@ def test_unicode_category_names_do_not_enter_request_paths(
     )
 
 
-@pytest.mark.parametrize("ref,needle", [("core", "ambiguous"), ("unknown", "category")])
+@pytest.mark.parametrize("ref,needle", [("core", "category"), ("unknown", "category")])
 def test_unresolved_categories_fail_without_guessing_cause(
     monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str, needle: str
 ) -> None:
@@ -261,7 +260,6 @@ def test_unresolved_categories_fail_without_guessing_cause(
                     "name": "Dev",
                     "subcategory_list": [{"id": 7, "slug": "core", "name": "Core"}],
                 },
-                {"id": 8, "slug": "core", "name": "Another core"},
             ]
         }
     }
@@ -355,6 +353,7 @@ def test_unsafe_or_nonadvancing_pagination_fails_before_next_request(
         BASE + next_url(1),
         "https://forum.example.test:443" + next_url(1),
         "latest.json?category=7&page=1",
+        "/latest?ascending=false&category=7&no_subcategories=false&order=activity&page=1",
     ],
 )
 def test_supported_pagination_links_are_rebuilt_locally(
@@ -364,6 +363,13 @@ def test_supported_pagination_links_are_rebuilt_locally(
     status, out, err = run(capsys, "--limit", "1")
     assert (status, err) == (0, "") and json.loads(out)["truncated"] is False
     assert requests[-1].full_url.startswith(BASE + "/latest.json?")
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(requests[-1].full_url).query) == {
+        "category": ["7"],
+        "order": ["activity"],
+        "ascending": ["false"],
+        "no_subcategories": ["false"],
+        "page": ["1"],
+    }
 
 
 def test_subfolder_pagination_and_auth_use_the_configured_client(
@@ -590,3 +596,182 @@ def test_pagination_cannot_leave_a_configured_subfolder(
     status, out, err = run(capsys, "--limit", "1")
     assert status == 1 and out == "" and "magpie-discourse error:" in err
     assert len(requests) == 2
+
+
+def test_large_category_scan_ends_at_the_since_boundary(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
+    pages = {}
+    for number in range(100):
+        rows = [
+            topic(index + 1, bumped_at=DATE if index < 2 else "2019-01-01T00:00:00Z")
+            for index in range(number * 30, (number + 1) * 30)
+        ]
+        pages[number] = page(rows, next_url(number + 1) if number < 99 else None)
+    requests = serve(monkeypatch, pages)
+    status, out, err = run(capsys, "--since", "2026-10-20")
+    assert (status, err) == (0, "")
+    assert [row["thread_id"] for row in json.loads(out)["threads"]] == ["1", "2"]
+    assert json.loads(out)["truncated"] is False
+    assert len(requests) == 2
+
+
+def test_missing_pinned_evidence_does_not_trigger_cutoff(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    unknown = topic(1, bumped_at="2019-01-01T00:00:00Z")
+    del unknown["pinned"]
+    requests = serve(monkeypatch, {0: page([unknown], next_url(1)), 1: page([topic(2), topic(3)])})
+    status, out, err = run(capsys, "--since", "2026-10-20", "--limit", "1")
+    assert (status, err) == (0, "")
+    assert [row["thread_id"] for row in json.loads(out)["threads"]] == ["2"]
+    assert json.loads(out)["truncated"] is True
+    assert len(requests) == 3
+
+
+def test_since_equality_and_old_pin_are_not_cutoffs(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
+    requests = serve(
+        monkeypatch,
+        {
+            0: page(
+                [
+                    topic(1, pinned=True, bumped_at="2019-01-01T00:00:00Z"),
+                    topic(2),
+                    topic(3, bumped_at="2026-10-20T11:59:59.999999Z"),
+                ],
+                next_url(1),
+            )
+        },
+    )
+    status, out, err = run(capsys, "--since", DATE, "--limit", "1")
+    assert (status, err) == (0, "")
+    assert [row["thread_id"] for row in json.loads(out)["threads"]] == ["2"]
+    assert json.loads(out)["truncated"] is False
+    assert len(requests) == 2
+
+
+def test_extra_match_before_cutoff_still_proves_truncation(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    requests = serve(monkeypatch, {0: page([topic(1), topic(2), topic(3, bumped_at="2019-01-01T00:00:00Z")])})
+    status, out, err = run(capsys, "--since", "2026-10-20", "--limit", "1")
+    assert (status, err) == (0, "")
+    assert json.loads(out)["truncated"] is True
+    assert len(requests) == 2
+
+
+def test_cutoff_does_not_bypass_received_page_validation(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    serve(monkeypatch, {0: page([topic(1, bumped_at="2019-01-01T00:00:00Z"), topic(2, posts_count=None)])})
+    status, out, err = run(capsys, "--since", "2026-10-20")
+    assert status == 1 and out == "" and "magpie-discourse error:" in err
+
+
+@pytest.mark.parametrize("slug", ["", "bad%zz", "encoded%2fseparator"])
+def test_numeric_id_does_not_require_a_usable_slug(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, slug: str
+) -> None:
+    selected = {**CATEGORY, "slug": slug}
+    requests = serve(monkeypatch, {0: page([])}, **{"/c/7/show.json": {"category": selected}})
+    status, out, err = run(capsys)
+    assert (status, err) == (0, "")
+    assert json.loads(out)["category"] == selected
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("slug", ["", "bad%zz", "encoded%2fseparator"])
+@pytest.mark.parametrize("ref", ["dev", "parent/dev"])
+def test_unrelated_unusable_slug_does_not_poison_lookup(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, slug: str, ref: str
+) -> None:
+    selected = (
+        CATEGORY
+        if ref == "dev"
+        else {"id": 1, "slug": "parent", "name": "Parent", "subcategory_list": [CATEGORY]}
+    )
+    catalog = {
+        "category_list": {
+            "categories": [
+                {
+                    "id": 8,
+                    "slug": slug,
+                    "name": "Other",
+                    "subcategory_list": [{"id": 9, "slug": "child", "name": "Child"}],
+                },
+                selected,
+            ]
+        }
+    }
+    serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
+    status, out, err = run(capsys, "--category", ref)
+    assert (status, err) == (0, "")
+    assert json.loads(out)["category"] == CATEGORY
+
+
+def test_bare_slug_prefers_confirmed_root_to_same_named_child(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    selected = {**CATEGORY, "slug": "core"}
+    catalog = {
+        "category_list": {
+            "categories": [
+                {
+                    "id": 1,
+                    "slug": "dev",
+                    "name": "Dev",
+                    "subcategory_list": [{"id": 2, "slug": "core", "name": "Child"}],
+                },
+                selected,
+            ]
+        }
+    }
+    serve(monkeypatch, {0: page([])}, **{"/categories.json": catalog})
+    status, out, err = run(capsys, "--category", "core")
+    assert (status, err) == (0, "")
+    assert json.loads(out)["category"] == selected
+
+
+@pytest.mark.parametrize("ref", ["core", "ops/core"])
+def test_partial_catalog_does_not_promote_an_orphan_child_to_root(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, ref: str
+) -> None:
+    catalog = {"category_list": {"categories": [{**CATEGORY, "slug": "core", "parent_category_id": 99}]}}
+    requests = serve(monkeypatch, {}, **{"/categories.json": catalog})
+    status, out, err = run(capsys, "--category", ref)
+    assert status == 1 and out == "" and "numeric" in err.lower()
+    assert len(requests) == 1
+
+
+def test_duplicate_confirmed_root_slugs_remain_ambiguous(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    catalog = {"category_list": {"categories": [CATEGORY, {**CATEGORY, "id": 8}]}}
+    requests = serve(monkeypatch, {}, **{"/categories.json": catalog})
+    status, out, err = run(capsys, "--category", "dev")
+    assert status == 1 and out == "" and "ambiguous" in err.lower()
+    assert len(requests) == 1
+
+
+def test_empty_slug_ancestor_does_not_invent_a_path(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
+    catalog = {
+        "category_list": {
+            "categories": [{"id": 1, "slug": "", "name": "Parent", "subcategory_list": [CATEGORY]}]
+        }
+    }
+    requests = serve(monkeypatch, {}, **{"/categories.json": catalog})
+    status, out, err = run(capsys, "--category", "1-category/dev")
+    assert status == 1 and out == "" and "numeric" in err.lower()
+    assert len(requests) == 1
+
+
+def test_oversized_ascii_id_uses_the_conversion_error_channel(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    requests = serve(monkeypatch, {})
+    previous = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(4300)
+        status, out, err = run(capsys, "--category", "9" * 4301)
+    finally:
+        sys.set_int_max_str_digits(previous)
+    assert status == 1 and out == "" and "Invalid category id" in err
+    assert requests == []
