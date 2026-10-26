@@ -25,7 +25,7 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-from magpie_discourse import topics
+from magpie_discourse import listing, topics
 from magpie_discourse.client import load_config
 
 
@@ -38,6 +38,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.subcommand == "topic" and args.topic_action == "view":
         topic_id = topics.parse_topic_ref(args.topic, config)
         result = topics.fetch_topic(config, topic_id, max_posts=args.max_posts)
+    elif args.subcommand == "topic" and args.topic_action == "list":
+        result = listing.list_topics(config, args.category, since=args.since, limit=args.limit)
     else:  # pragma: no cover - argparse rejects anything else
         raise AssertionError(f"unhandled command {args}")
 
@@ -63,5 +65,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=topics.DEFAULT_MAX_POSTS,
         help=f"Read at most this many posts (default {topics.DEFAULT_MAX_POSTS}); "
         "a longer topic is returned with truncated: true.",
+    )
+    topic_list = topic_subparsers.add_parser(
+        "list", help="List category topics by latest activity, optionally since a cutoff."
+    )
+    topic_list.add_argument(
+        "--category", required=True, help="Category id, top-level slug, category URL or slug/.../id."
+    )
+    topic_list.add_argument(
+        "--since", help="Inclusive activity cutoff: UTC date or ISO-8601 timestamp with timezone."
+    )
+    topic_list.add_argument(
+        "--limit",
+        type=int,
+        default=listing.DEFAULT_LIMIT,
+        help=f"Return at most this many unique topics (default {listing.DEFAULT_LIMIT}); look ahead to prove truncation.",
     )
     return parser

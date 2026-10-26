@@ -241,7 +241,13 @@ by swapping the adapter, not the skill.
   Coverage is not complete or selectable as an archive backend yet.
   `DISCOURSE_API_KEY` + `DISCOURSE_API_USERNAME` cover authorised private reads
   and are only sent within the `DISCOURSE_URL` origin and configured path.
-  Only GET requests are permitted. Topic list, search,
+  `topic list --category <id|slug|url|slug/.../id> [--since <ISO-8601>] [--limit N]` includes subcategories.
+  IDs and same-forum ID-bearing references read category metadata directly; bare slugs match only catalog roots, with an ID fallback when unresolved.
+  Results preserve pinned/descending `bumped_at` order; since is inclusive, dates mean midnight UTC and timestamps require a timezone with at most microsecond precision.
+  Summaries reuse `thread_summary` fields plus activity metadata; `last_message_date` maps only `last_posted_at`, preserving missing/null without fallback.
+  Pinned topics count toward the positive limit (default 100); only an extra unique match proves truncation, and an older explicitly non-pinned topic ends a since scan.
+  Received pages are strictly validated; malformed data or failed requests produce no partial output. Lists are not consistent snapshots and have no pagination budget.
+  Only GET requests are permitted. Search,
   user activity, guarded writes and the remaining mail-archive verbs are
   tracked in #307.
 - `tools/forgejo/` — doc-only Forgejo / Gitea adapter (#1469, part of
