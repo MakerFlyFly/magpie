@@ -23,11 +23,9 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
-from urllib.request import Request
 
 from magpie_discourse.categories import resolve_category
-from magpie_discourse.client import DiscourseConfig, DiscourseError, SameOriginRedirectHandler, get_json
+from magpie_discourse.client import DiscourseConfig, DiscourseError, get_json
 
 DEFAULT_LIMIT = 100
 _DATE = r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
@@ -94,50 +92,6 @@ def _summary(raw: Any, config: DiscourseConfig) -> tuple[dict[str, Any], datetim
     }, bumped
 
 
-def _next_page(config: DiscourseConfig, value: Any, page: int, category_id: int) -> bool:
-    """Validate the continuation's scope and progress; never follow its URL directly."""
-    if value is None or value == "":
-        return False
-    message = "Discourse returned an invalid or non-advancing pagination link"
-    if not isinstance(value, str) or "#" in value or any(ord(c) < 32 or ord(c) == 127 for c in value):
-        raise DiscourseError(message)
-    try:
-        supplied = urlsplit(value)
-        base = urlsplit(config.base_url)
-        if supplied.scheme:
-            target = value
-        elif value.startswith("//"):
-            target = f"{base.scheme}:{value}"
-        elif value.startswith("/"):
-            target = f"{base.scheme}://{base.netloc}{value}"
-        else:
-            target = f"{config.base_url}/{value}"
-        SameOriginRedirectHandler(config.base_url).check_request(Request(target, method="GET"))
-        parsed = urlsplit(target)
-        if parsed.path not in (f"{base.path}/latest", f"{base.path}/latest.json"):
-            raise DiscourseError(message)
-        query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
-        expected = {
-            "category": str(category_id),
-            "order": "activity",
-            "ascending": "false",
-            "no_subcategories": "false",
-        }
-        if set(query) - (set(expected) | {"page"}):
-            raise DiscourseError(message)
-        if query.get("category") != [str(category_id)]:
-            raise DiscourseError(message)
-        for key, wanted in expected.items():
-            if key in query and query[key] != [wanted]:
-                raise DiscourseError(message)
-        numbers = query.get("page", [])
-        if len(numbers) != 1 or not re.fullmatch(r"[0-9]+", numbers[0]) or int(numbers[0]) != page + 1:
-            raise DiscourseError(message)
-    except ValueError as exc:
-        raise DiscourseError(message) from exc
-    return True
-
-
 def list_topics(
     config: DiscourseConfig, category: str, *, since: str | None = None, limit: int = DEFAULT_LIMIT
 ) -> dict[str, Any]:
@@ -167,7 +121,10 @@ def list_topics(
             raise DiscourseError("Discourse returned an invalid topic summary collection")
         # Validate the entire response page, including records outside the output cap.
         summaries = [_summary(raw, config) for raw in envelope["topics"]]
-        more = _next_page(config, envelope.get("more_topics_url"), page, selected["id"])
+        continuation = envelope.get("more_topics_url")
+        if continuation is not None and not isinstance(continuation, str):
+            raise DiscourseError("Discourse returned an invalid pagination signal")
+        more = bool(continuation)
         fingerprint = tuple(summary["thread_id"] for summary, _ in summaries)
         if more and (not summaries or fingerprint in seen_pages):
             raise DiscourseError(

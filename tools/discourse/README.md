@@ -65,9 +65,9 @@ uv run --project tools/discourse magpie-discourse topic view https://discuss.exa
 # Read at most 100 posts of a long topic
 uv run --project tools/discourse magpie-discourse topic view 12345 --max-posts 100
 
-# Recent activity in a category, including its subcategories
+# Category topics ordered by latest activity, optionally since a cutoff
 uv run --project tools/discourse magpie-discourse topic list --category development --since 2026-10-01
-uv run --project tools/discourse magpie-discourse topic list --category development/core --limit 50
+uv run --project tools/discourse magpie-discourse topic list --category development/core/7 --limit 50
 uv run --project tools/discourse magpie-discourse topic list --category 7 --since 2026-10-01T00:00:00Z
 ```
 
@@ -164,55 +164,26 @@ the stream; callers must not assume the last message has the latest date.
 
 ### Topic list
 
-`topic list --category <slug|parent/child|id> [--since <ISO-8601>] [--limit N]`
-returns category activity using mail-archive `thread_summary` field names.
-It does not implement `list_recent_threads` or its ordering by last message date.
+`topic list --category <id|slug|url|slug/.../id> [--since <ISO-8601>] [--limit N]`
+returns `category: {id, slug, name}`, `since`, `threads` and `truncated`.
+Use a positive ASCII ID, top-level slug, same-forum `/c/.../ID` URL or `slug/.../ID`; subcategories are included.
+ID references work with empty slugs; catalog lookup can be incomplete, so use an ID if a top-level slug cannot be resolved.
+Manual paths without an ID are unsupported.
 
-| Field | Value |
-|---|---|
-| `category` | Selected `id` (integer), `slug` (possibly empty) and `name`; subcategories are included. |
-| `since` | Inclusive activity cutoff normalized to UTC, or `null` when omitted. |
-| `threads[]` | Unique matches in server activity-list order, preserving pinned positions. |
-| `truncated` | `true` only after finding an extra unique match beyond `--limit` (default 100). |
+`--since` includes `bumped_at >= since`; dates mean midnight UTC, timestamps require a timezone and at most six fractional digits.
+`since` is normalized to UTC, or null when omitted; omitting it sets no time window.
+Threads contain `thread_id` (string), `subject` (title), `first_message_date` (`created_at`),
+`last_message_date` (`last_posted_at`, missing/null stays null), `message_count` (`posts_count`),
+`permalink` (accepted by `topic view`), `bumped_at`, `tags`, `pinned`, `closed` and `archived`.
+Activity and last-message times never fall back to each other; this is partial coverage, without the archive contract's last-message ordering.
 
-Each thread contains `thread_id` (string), `subject`, `first_message_date` (`created_at`),
-`last_message_date` (`last_posted_at`, missing/null stays `null`), `message_count` (`posts_count`),
-a `permalink` accepted by `topic view`, and `bumped_at`, `tags`, `pinned`, `closed`, `archived`.
-Activity time and last-message time never fall back to each other.
-
-`--since` compares `bumped_at >= since`; use `YYYY-MM-DD` for midnight UTC or
-`YYYY-MM-DDTHH:MM:SS[.ffffff]` with `Z` or a signed `HH:MM` timezone offset.
-Invalid dates, missing timezones and precision beyond six fractional digits fail before HTTP.
-`--limit` must be a positive integer.
-
-Select by positive ASCII ID, top-level slug or full ancestry path; bare slugs never select subcategories.
-IDs work even with empty/unusable slugs.
-Catalog paths require complete, usable ancestor evidence; an unrelated unusable slug does not invalidate independent selections.
-Missing or ambiguous catalog evidence fails explicitly and suggests an ID.
-Names and fallback URL slugs are not substituted.
-Unicode/UTF-8-escaped slug components are decoded once; malformed/nested escapes, encoded separators and dot components are refused.
-Slugs never become HTTP request paths.
-
-Every page explicitly requests descending activity order and the same category scope.
-Continuation links must preserve origin, forum path, latest-list scope and page progress;
-explicitly conflicting parameters are refused and requests are rebuilt locally.
-Relative and absolute links, with or without `.json`, are accepted.
-Filtering precedes deduplication; the first matching record wins.
-
-The scan relies on Discourse's descending activity order for non-pinned topics.
-With `--since`, an older topic explicitly marked `pinned: false` ends the scan.
-Old pinned topics and absent pin flags do not establish that boundary.
-Otherwise, lookahead continues to an extra unique match or the end of the list.
-Only an extra match proves truncation; exactly filling limit or receiving a continuation does not.
-An empty/repeated complete page claiming continuation or an invalid/looping link fails the read.
-The changing list is not a consistent snapshot.
-
-Each received page is validated before taking results or stopping at the time boundary.
-It requires a `topic_list.topics` array, positive integer IDs, string titles, non-negative integer counts and valid timestamps.
-Missing/null `last_posted_at` is allowed; missing/null tags become an empty array, with tag strings and named objects supported.
-Status flags default to false in output, but that default is not cutoff evidence; present flags must be boolean.
-Failures print no successful result JSON.
-There are no automatic retries or page, response-byte or total-duration budgets.
+Results preserve native pinned/descending activity order.
+Pinned topics, including category About topics, count toward `--limit` even when old if no since cutoff excludes them.
+Callers can filter on `pinned`; filtering does not refill the result.
+`--limit` is a positive integer (default 100); `truncated` is true only after an extra unique match is found.
+With since, an older topic explicitly marked non-pinned ends the scan.
+Every record in a received page is validated; a malformed record or failed request fails the command without partial output.
+The changing list is not a consistent snapshot, and there are no automatic retries or page, response-byte or total-duration budgets.
 
 ## Forum content is data
 
