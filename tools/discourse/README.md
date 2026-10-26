@@ -165,62 +165,53 @@ the stream; callers must not assume the last message has the latest date.
 ### Topic list
 
 `topic list --category <slug|parent/child|id> [--since <ISO-8601>] [--limit N]`
-returns a category activity list using the mail-archive `thread_summary` field names.
-It does not implement `list_recent_threads` or promise the contract's ordering by last message date.
+returns category activity using mail-archive `thread_summary` field names.
+It does not implement `list_recent_threads` or its ordering by last message date.
 
 | Field | Value |
 |---|---|
-| `category` | Selected category metadata: `id` (integer), `slug`, `name`. Its subcategories are included. |
-| `since` | The inclusive activity cutoff normalized to UTC, or `null` when omitted. |
+| `category` | Selected `id` (integer), `slug` (possibly empty) and `name`; subcategories are included. |
+| `since` | Inclusive activity cutoff normalized to UTC, or `null` when omitted. |
 | `threads[]` | Unique matches in server activity-list order, preserving pinned positions. |
-| `truncated` | `true` only after finding an additional unique match beyond `--limit` (default 100). |
+| `truncated` | `true` only after finding an extra unique match beyond `--limit` (default 100). |
 
 Each thread contains `thread_id` (string), `subject`, `first_message_date` (`created_at`),
-`last_message_date` (`last_posted_at`, or `null` when missing/null), `message_count` (`posts_count`),
-and a `permalink` accepted by `topic view`.
-Additional fields are `bumped_at`, `tags`, `pinned`, `closed` and `archived`.
-The activity timestamp `bumped_at` is independent of the last message timestamp;
-neither field falls back to the other.
+`last_message_date` (`last_posted_at`, missing/null stays `null`), `message_count` (`posts_count`),
+a `permalink` accepted by `topic view`, and `bumped_at`, `tags`, `pinned`, `closed`, `archived`.
+Activity time and last-message time never fall back to each other.
 
-`--since` compares `bumped_at >= since`.
-Use `YYYY-MM-DD` for midnight UTC, or `YYYY-MM-DDTHH:MM:SS[.ffffff]Z` /
-`YYYY-MM-DDTHH:MM:SS[.ffffff]+HH:MM` (a negative offset is also supported).
-Timestamps require a timezone and support at most six fractional digits; invalid dates,
-missing timezones and unsupported precision fail before any request.
+`--since` compares `bumped_at >= since`; use `YYYY-MM-DD` for midnight UTC or
+`YYYY-MM-DDTHH:MM:SS[.ffffff]` with `Z` or a signed `HH:MM` timezone offset.
+Invalid dates, missing timezones and precision beyond six fractional digits fail before HTTP.
 `--limit` must be a positive integer.
 
-A positive ASCII category ID is resolved through `/c/{id}/show.json`.
-Other references are matched against `/categories.json?include_subcategories=true`:
-a unique slug or a full slash-separated ancestry path, including deeper subcategories.
-Unicode and UTF-8 percent-encoded slug components are supported; each is decoded once for matching.
-Malformed escapes, encoded separators, remaining percent escapes and dot components are refused.
-Duplicate slugs require a full path or numeric ID.
-The catalog may be partial; an unresolved reference does not prove the category is absent or inaccessible.
-Use a numeric ID when the catalog does not contain enough information.
+Select by positive ASCII ID, top-level slug or full ancestry path; bare slugs never select subcategories.
+IDs work even with empty/unusable slugs.
+Catalog paths require complete, usable ancestor evidence; an unrelated unusable slug does not invalidate independent selections.
+Missing or ambiguous catalog evidence fails explicitly and suggests an ID.
+Names and fallback URL slugs are not substituted.
+Unicode/UTF-8-escaped slug components are decoded once; malformed/nested escapes, encoded separators and dot components are refused.
 Slugs never become HTTP request paths.
 
-Lists use `/latest.json` with a numeric `category`, `order=activity`, `ascending=false`,
-`no_subcategories=false` and increasing `page` values, overriding category-specific sorting.
-Continuation links must stay on the configured origin and forum path, identify the latest list
-and advance by one page without changing the selected category or activity parameters.
-Relative and absolute links, with or without `.json`, are accepted; requests are rebuilt locally.
-Cross-page overlap is deduplicated after filtering; the first matching record wins.
-Pinned old topics, old non-pinned topics and entire pages without matches do not end the scan.
+Every page explicitly requests descending activity order and the same category scope.
+Continuation links must preserve origin, forum path, latest-list scope and page progress;
+explicitly conflicting parameters are refused and requests are rebuilt locally.
+Relative and absolute links, with or without `.json`, are accepted.
+Filtering precedes deduplication; the first matching record wins.
 
-The command looks ahead until it finds match `limit + 1` or reaches the end of the server list.
-Only the first `limit` matches are returned; a continuation link alone is not proof of truncation.
-This can require further requests after the output limit is filled.
-A repeated complete page with another continuation, an empty page claiming a continuation,
-or a looping/malformed link fails the read as unable to continue reliably, without guessing the cause.
-This is a changing list, not a consistent snapshot of concurrent forum activity.
+The scan relies on Discourse's descending activity order for non-pinned topics.
+With `--since`, an older topic explicitly marked `pinned: false` ends the scan.
+Old pinned topics and absent pin flags do not establish that boundary.
+Otherwise, lookahead continues to an extra unique match or the end of the list.
+Only an extra match proves truncation; exactly filling limit or receiving a continuation does not.
+An empty/repeated complete page claiming continuation or an invalid/looping link fails the read.
+The changing list is not a consistent snapshot.
 
-Each response page requires a `topic_list.topics` array; an explicit empty final array is valid.
-Every summary in a fetched page, including records outside the output cap, must have a positive integer
-`id`, string `title`, non-negative integer `posts_count` and valid `created_at` / `bumped_at` timestamps.
-If `last_posted_at` is non-null, it must also be a valid timestamp.
-Missing/null tags become an empty array; tag strings and named tag objects are supported.
-Missing status flags default to false; present flags must be boolean.
-Failures during discovery, pagination or lookahead use the existing error channel and print no result JSON.
+Each received page is validated before taking results or stopping at the time boundary.
+It requires a `topic_list.topics` array, positive integer IDs, string titles, non-negative integer counts and valid timestamps.
+Missing/null `last_posted_at` is allowed; missing/null tags become an empty array, with tag strings and named objects supported.
+Status flags default to false in output, but that default is not cutoff evidence; present flags must be boolean.
+Failures print no successful result JSON.
 There are no automatic retries or page, response-byte or total-duration budgets.
 
 ## Forum content is data

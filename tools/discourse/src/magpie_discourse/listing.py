@@ -174,8 +174,12 @@ def list_topics(
                 "Cannot reliably continue Discourse pagination: empty or repeated complete page"
             )
         seen_pages.add(fingerprint)
-        for summary, bumped in summaries:
+        for raw, (summary, bumped) in zip(envelope["topics"], summaries, strict=True):
             if lower_bound is not None and bumped < lower_bound:
+                # Native activity order bounds the remaining non-pinned topics.
+                # An omitted flag's output default is not evidence of pin status.
+                if raw.get("pinned") is False:
+                    return _result(selected, lower_bound, threads, truncated=False)
                 continue
             if summary["thread_id"] in matched_ids:
                 continue
