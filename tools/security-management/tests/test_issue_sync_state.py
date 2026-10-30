@@ -102,6 +102,92 @@ def test_disclosure_age_and_expected_date(capsys, tmp_path):
     assert out["expected_disclosure_by"] == "2026-11-02"
 
 
+@pytest.mark.parametrize(
+    ("extra", "deadline", "expired"),
+    [
+        ({}, "2026-04-15", False),
+        ({"grace_period_days": None}, "2026-04-15", False),
+        ({"grace_period_days": 0}, "2026-04-01", True),
+        ({"grace_period_days": "0"}, "2026-04-01", True),
+        ({"grace_period_days": 1}, "2026-04-02", True),
+        ({"grace_period_days": 14}, "2026-04-15", False),
+        ({"window_days": None}, "2026-04-15", False),
+        ({"window_days": 0}, "2026-01-15", True),
+        ({"window_days": "0"}, "2026-01-15", True),
+        ({"window_days": 1}, "2026-01-16", True),
+        ({"window_days": 90}, "2026-04-15", False),
+    ],
+)
+def test_disclosure_configured_days(capsys, tmp_path, extra, deadline, expired):
+    out = ok(
+        capsys,
+        tmp_path,
+        "disclosure",
+        {
+            "now": "2026-04-05T12:00:00Z",
+            "created_at": "2026-01-01T09:00:00Z",
+            "labels": ["pr merged"],
+            **extra,
+        },
+    )
+    assert out["expected_disclosure_by"] == deadline
+    assert out["overdue_for_disclosure"] is True
+    assert out["grace_period_expired"] is expired
+
+
+@pytest.mark.parametrize("shipping", ["pr merged", "fix released"])
+@pytest.mark.parametrize(
+    ("window", "now", "expired"),
+    [
+        (90, "2026-04-01T12:00:00Z", False),
+        (90, "2026-04-02T12:00:00Z", True),
+        (0, "2026-01-01T12:00:00Z", False),
+        (0, "2026-01-02T12:00:00Z", True),
+    ],
+)
+def test_zero_grace_period_preserves_day_boundary(capsys, tmp_path, shipping, window, now, expired):
+    out = ok(
+        capsys,
+        tmp_path,
+        "disclosure",
+        {
+            "now": now,
+            "created_at": "2026-01-01T09:00:00Z",
+            "labels": [shipping],
+            "window_days": window,
+            "grace_period_days": 0,
+        },
+    )
+    assert out["overdue_for_disclosure"] is expired
+    assert out["grace_period_expired"] is expired
+
+
+@pytest.mark.parametrize(
+    ("labels", "overdue"),
+    [
+        ([], True),
+        (["pr merged", "announced"], False),
+        (["fix released", "announced - emails sent"], False),
+    ],
+)
+def test_zero_grace_period_preserves_label_guards(capsys, tmp_path, labels, overdue):
+    out = ok(
+        capsys,
+        tmp_path,
+        "disclosure",
+        {
+            "now": "2026-04-05T12:00:00Z",
+            "created_at": "2026-01-01T09:00:00Z",
+            "labels": labels,
+            "grace_period_days": 0,
+            "pre_announce_distributors": True,
+        },
+    )
+    assert out["overdue_for_disclosure"] is overdue
+    assert out["grace_period_expired"] is False
+    assert out["distributor_notify_pending"] is False
+
+
 # --- 1c: reporter staleness --------------------------------------------------
 
 
@@ -131,6 +217,69 @@ def test_disclosure_age_and_expected_date(capsys, tmp_path):
 def test_staleness(capsys, tmp_path, messages, stale, days):
     out = ok(capsys, tmp_path, "staleness", {"now": NOW, "messages": messages})
     assert (out["stale"], out["days"]) == (stale, days)
+
+
+@pytest.mark.parametrize(
+    ("extra", "stale"),
+    [
+        ({}, False),
+        ({"timeout_days": None}, False),
+        ({"timeout_days": 0}, True),
+        ({"timeout_days": "0"}, True),
+        ({"timeout_days": 1}, False),
+        ({"timeout_days": 14}, False),
+    ],
+)
+def test_staleness_configured_timeout(capsys, tmp_path, extra, stale):
+    out = ok(
+        capsys,
+        tmp_path,
+        "staleness",
+        {
+            "now": "2026-04-05T12:00:00Z",
+            "messages": [{"from_team": True, "at": "2026-04-04T23:59:00Z"}],
+            **extra,
+        },
+    )
+    assert (out["stale"], out["days"]) == (stale, 1)
+
+
+@pytest.mark.parametrize(
+    ("timeout", "now", "stale"),
+    [
+        (0, "2026-04-04T23:59:00Z", False),
+        (0, "2026-04-05T00:00:00Z", True),
+        (1, "2026-04-05T23:59:00Z", False),
+        (1, "2026-04-06T00:00:00Z", True),
+    ],
+)
+def test_staleness_timeout_day_boundary(capsys, tmp_path, timeout, now, stale):
+    out = ok(
+        capsys,
+        tmp_path,
+        "staleness",
+        {
+            "now": now,
+            "messages": [{"from_team": True, "at": "2026-04-04T12:00:00Z"}],
+            "timeout_days": timeout,
+        },
+    )
+    assert out["stale"] is stale
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [],
+        [
+            {"from_team": True, "at": "2026-04-01T00:00:00Z"},
+            {"from_team": False, "at": "2026-04-02T00:00:00Z"},
+        ],
+    ],
+)
+def test_zero_timeout_preserves_reporter_turn(capsys, tmp_path, messages):
+    out = ok(capsys, tmp_path, "staleness", {"now": NOW, "messages": messages, "timeout_days": 0})
+    assert (out["stale"], out["days"]) == (False, None)
 
 
 # --- 1g: closed announced trackers -------------------------------------------
