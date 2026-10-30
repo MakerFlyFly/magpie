@@ -80,6 +80,8 @@ def disclosure(data: Mapping[str, Any]) -> dict[str, Any]:
     now = _time(data["now"])
     age = _days(_time(data["created_at"]), now)
     window = _configured_days(data, "window_days", 90)
+    if window <= 0:  # as issue-import reads it: the window must be positive
+        window = 90
     grace = _configured_days(data, "grace_period_days", 14)
     labels = set(_labels(data))
     announced = bool(labels & {"announced", "announced - emails sent"})

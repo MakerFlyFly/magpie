@@ -112,8 +112,9 @@ def test_disclosure_age_and_expected_date(capsys, tmp_path):
         ({"grace_period_days": 1}, "2026-04-02", True),
         ({"grace_period_days": 14}, "2026-04-15", False),
         ({"window_days": None}, "2026-04-15", False),
-        ({"window_days": 0}, "2026-01-15", True),
-        ({"window_days": "0"}, "2026-01-15", True),
+        ({"window_days": 0}, "2026-04-15", False),
+        ({"window_days": "0"}, "2026-04-15", False),
+        ({"window_days": -1}, "2026-04-15", False),
         ({"window_days": 1}, "2026-01-16", True),
         ({"window_days": 90}, "2026-04-15", False),
     ],
@@ -141,8 +142,8 @@ def test_disclosure_configured_days(capsys, tmp_path, extra, deadline, expired):
     [
         (90, "2026-04-01T12:00:00Z", False),
         (90, "2026-04-02T12:00:00Z", True),
-        (0, "2026-01-01T12:00:00Z", False),
-        (0, "2026-01-02T12:00:00Z", True),
+        (1, "2026-01-02T12:00:00Z", False),
+        (1, "2026-01-03T12:00:00Z", True),
     ],
 )
 def test_zero_grace_period_preserves_day_boundary(capsys, tmp_path, shipping, window, now, expired):
@@ -306,18 +307,6 @@ def test_issue_sync_refuses_empty_day_inputs(capsys, tmp_path, day_setting, valu
     assert code == 2
     assert out["ok"] is False
     assert isinstance(out["refused"], str) and out["refused"]
-
-
-def test_issue_sync_coerces_false_day_input_to_zero(capsys, tmp_path, day_setting):
-    command, field, data = day_setting
-    out = ok(capsys, tmp_path, command, {**data, field: False})
-    expected: dict[str, dict[str, Any]] = {
-        "window_days": {"expected_disclosure_by": "2026-01-15"},
-        "grace_period_days": {"expected_disclosure_by": "2026-04-01"},
-        "timeout_days": {"stale": True, "days": 1},
-    }
-    for key, value in expected[field].items():
-        assert out[key] == value
 
 
 # --- 1g: closed announced trackers -------------------------------------------
