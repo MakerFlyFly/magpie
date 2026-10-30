@@ -282,6 +282,44 @@ def test_zero_timeout_preserves_reporter_turn(capsys, tmp_path, messages):
     assert (out["stale"], out["days"]) == (False, None)
 
 
+# --- day setting coercion ---------------------------------------------------
+
+
+@pytest.fixture(params=["window_days", "grace_period_days", "timeout_days"])
+def day_setting(request):
+    field = request.param
+    data: dict[str, Any] = {"now": "2026-04-05T12:00:00Z"}
+    if field == "timeout_days":
+        data["messages"] = [{"from_team": True, "at": "2026-04-04T12:00:00Z"}]
+        return "staleness", field, data
+    data.update(created_at="2026-01-01T09:00:00Z", labels=["pr merged"])
+    return "disclosure", field, data
+
+
+@pytest.mark.parametrize("value", ["", [], {}], ids=["empty-string", "empty-list", "empty-object"])
+def test_issue_sync_refuses_empty_day_inputs(capsys, tmp_path, day_setting, value):
+    command, field, data = day_setting
+    path = tmp_path / "input.json"
+    path.write_text(json.dumps({**data, field: value}), encoding="utf-8")
+    code = main(["issue-sync", command, "--input", str(path)])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert out["ok"] is False
+    assert isinstance(out["refused"], str) and out["refused"]
+
+
+def test_issue_sync_coerces_false_day_input_to_zero(capsys, tmp_path, day_setting):
+    command, field, data = day_setting
+    out = ok(capsys, tmp_path, command, {**data, field: False})
+    expected: dict[str, dict[str, Any]] = {
+        "window_days": {"expected_disclosure_by": "2026-01-15"},
+        "grace_period_days": {"expected_disclosure_by": "2026-04-01"},
+        "timeout_days": {"stale": True, "days": 1},
+    }
+    for key, value in expected[field].items():
+        assert out[key] == value
+
+
 # --- 1g: closed announced trackers -------------------------------------------
 
 
