@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import re
@@ -28,10 +29,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_REQUESTS = 64
+DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024
+RESPONSE_CHUNK_BYTES = 64 * 1024
 
 QueryValue = str | int | Sequence[str | int]
 
@@ -40,13 +44,71 @@ class DiscourseError(Exception):
     """Raised when the Discourse bridge cannot complete a request."""
 
 
+class RequestBudgetError(DiscourseError):
+    """Raised when a read needs more request attempts than its budget allows."""
+
+
+@dataclass
+class ReadBudget:
+    """Mutable request and response-body accounting shared through DiscourseConfig."""
+
+    max_requests: int = DEFAULT_MAX_REQUESTS
+    max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
+    requests: int = field(default=0, init=False)
+    body_bytes: int = field(default=0, init=False)
+
+    def start_request(self) -> None:
+        """Charge one permitted attempt before it reaches the transport."""
+        if self.requests >= self.max_requests:
+            raise RequestBudgetError(f"Discourse read budget exhausted: {self.max_requests} HTTP requests")
+        if self.body_bytes >= self.max_body_bytes:
+            raise DiscourseError(
+                f"Discourse read budget exhausted: {self.max_body_bytes} response-body bytes"
+            )
+        self.requests += 1
+
+    def read_body(self, response: Any) -> bytearray:
+        """Read within the remaining allowance, with one byte to detect overflow."""
+        body = bytearray()
+        while self.body_bytes <= self.max_body_bytes:
+            chunk = response.read(min(RESPONSE_CHUNK_BYTES, self.max_body_bytes - self.body_bytes + 1))
+            self.body_bytes += len(chunk)
+            if self.body_bytes > self.max_body_bytes:
+                break
+            if not chunk:
+                # HTTPResponse.read(size) can reach EOF without the IncompleteRead
+                # raised by read(); do not accept a truncated but valid JSON prefix.
+                unread = getattr(response, "length", None)
+                if isinstance(unread, int) and unread > 0:
+                    raise OSError("Discourse response ended before its declared Content-Length")
+                return body
+            body.extend(chunk)
+        raise DiscourseError(f"Discourse read budget exhausted: {self.max_body_bytes} response-body bytes")
+
+
 class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Keep read requests within the configured forum's origin and path."""
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, budget: ReadBudget | None = None) -> None:
+        self._budget = budget if budget is not None else ReadBudget()
         self._origin = origin(parse_url(base_url))
         self._raw_path = urllib.parse.urlsplit(base_url).path.rstrip("/")
         self._path = _checked_path(base_url).rstrip("/")
+
+    def https_request(self, request: urllib.request.Request) -> urllib.request.Request:
+        """Apply the same check and budget to initial requests and every redirect."""
+        self.check_request(request)
+        self._budget.start_request()
+        return request
+
+    def http_error_302(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any) -> Any:
+        """Keep urllib's redirect rules without draining an unused response body."""
+        if "location" not in headers and "uri" not in headers:
+            return None
+        fp.close()
+        return super().http_error_302(req, io.BytesIO(), code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
     def check_request(self, request: urllib.request.Request) -> None:
         """Reject writes and requests outside the configured forum before sending."""
@@ -134,15 +196,16 @@ def _is_under_path(path: str, base_path: str) -> bool:
 
 @dataclass(frozen=True)
 class DiscourseConfig:
-    """Environment-derived Discourse bridge configuration."""
+    """Frozen settings with a mutable read budget shared by operations on this instance."""
 
     base_url: str
     api_key: str | None
     api_username: str | None
+    budget: ReadBudget = field(default_factory=ReadBudget, repr=False, compare=False)
 
 
 def load_config() -> DiscourseConfig:
-    """Load the bridge configuration from environment variables."""
+    """Load environment settings with a fresh budget for one command."""
     raw_url = os.environ.get("DISCOURSE_URL", "").strip()
     if not raw_url:
         raise DiscourseError("DISCOURSE_URL is required (the forum's https:// base URL)")
@@ -195,9 +258,9 @@ def api_url(config: DiscourseConfig, path: str, params: Mapping[str, QueryValue]
     return url
 
 
-def _urlopen(request: urllib.request.Request, timeout: float, *, base_url: str) -> Any:
+def _urlopen(request: urllib.request.Request, timeout: float, *, base_url: str, budget: ReadBudget) -> Any:
     """Open a GET with the configured forum boundary (patched in tests)."""
-    handler = SameOriginRedirectHandler(base_url)
+    handler = SameOriginRedirectHandler(base_url, budget)
     handler.check_request(request)
     opener = urllib.request.build_opener(handler)
     return opener.open(request, timeout=timeout)
@@ -214,12 +277,15 @@ def get_json(
         method="GET",
     )
     try:
-        with _urlopen(request, DEFAULT_TIMEOUT_SECONDS, base_url=config.base_url) as response:
-            parsed = json.loads(response.read().decode("utf-8"))
+        with _urlopen(
+            request, DEFAULT_TIMEOUT_SECONDS, base_url=config.base_url, budget=config.budget
+        ) as response:
+            parsed = json.loads(config.budget.read_body(response).decode("utf-8"))
     except DiscourseError:
         raise
     except urllib.error.HTTPError as exc:
-        raise DiscourseError(_http_error_message(exc)) from exc
+        with exc:
+            raise DiscourseError(_http_error_message(exc, config.budget)) from exc
     except urllib.error.URLError as exc:
         raise DiscourseError(f"Failed to connect to Discourse: {exc.reason}") from exc
     except TimeoutError as exc:
@@ -233,7 +299,7 @@ def get_json(
     return parsed
 
 
-def _http_error_message(exc: urllib.error.HTTPError) -> str:
+def _http_error_message(exc: urllib.error.HTTPError, budget: ReadBudget) -> str:
     """Describe an HTTP error, keeping Discourse's own error text when it sends one."""
     message = f"Discourse request failed with HTTP {exc.code}"
     if exc.code == 429:
@@ -241,7 +307,9 @@ def _http_error_message(exc: urllib.error.HTTPError) -> str:
         hint = f"{retry_after} seconds" if retry_after and retry_after.isdecimal() else retry_after
         return f"{message} (rate limited; retry after {hint or 'a while'})"
     try:
-        body = json.loads(exc.read().decode("utf-8"))
+        body = json.loads(budget.read_body(exc).decode("utf-8"))
+    except DiscourseError:
+        return f"{message} (error body exceeded the remaining read budget)"
     except (OSError, http.client.HTTPException, UnicodeDecodeError, json.JSONDecodeError):
         return message
     errors = body.get("errors") if isinstance(body, dict) else None
