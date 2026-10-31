@@ -23,11 +23,18 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from magpie_discourse.client import DiscourseConfig, DiscourseError, get_json, origin, parse_url
+from magpie_discourse.client import (
+    DiscourseConfig,
+    DiscourseError,
+    RequestBudgetError,
+    get_json,
+    origin,
+    parse_url,
+)
 
 #: Posts returned per ``/t/{id}/posts.json`` request; Discourse's own chunk size.
 POSTS_CHUNK_SIZE = 20
-#: Default ceiling on posts read for one topic; a longer topic is marked truncated.
+#: Default post-count limit; truncation is reported only after a successful read.
 DEFAULT_MAX_POSTS = 500
 
 _TOPIC_PATH = re.compile(r"^/t/(?:[^/]+/)?(?P<id>[0-9]+)(?:/[0-9]+)?(?:\.json)?/?$")
@@ -86,6 +93,13 @@ def fetch_topic(config: DiscourseConfig, topic_id: int, max_posts: int = DEFAULT
 
     wanted = post_ids[:max_posts]
     missing = [post_id for post_id in wanted if post_id not in posts]
+    requests_needed = (len(missing) + POSTS_CHUNK_SIZE - 1) // POSTS_CHUNK_SIZE
+    remaining_requests = config.budget.max_requests - config.budget.requests
+    if requests_needed > remaining_requests:
+        raise RequestBudgetError(
+            f"Discourse topic needs at least {requests_needed} more HTTP requests, "
+            f"but {remaining_requests} remain in the read budget; lower --max-posts"
+        )
     for start in range(0, len(missing), POSTS_CHUNK_SIZE):
         chunk = missing[start : start + POSTS_CHUNK_SIZE]
         extra = get_json(config, f"/t/{topic_id}/posts.json", {"post_ids[]": chunk})

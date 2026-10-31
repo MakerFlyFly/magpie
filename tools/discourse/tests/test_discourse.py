@@ -765,7 +765,12 @@ def test_transport_checks_the_initial_request_before_opening(
 
     monkeypatch.setattr(urllib.request, "build_opener", unexpected_open)
     with pytest.raises(DiscourseError):
-        client._urlopen(urllib.request.Request(url, method=method), 30, base_url=f"{BASE}/forum")
+        client._urlopen(
+            urllib.request.Request(url, method=method),
+            30,
+            base_url=f"{BASE}/forum",
+            budget=client.ReadBudget(),
+        )
 
 
 def test_cli_transport_binds_redirects_to_the_configured_forum(
@@ -977,7 +982,7 @@ def test_transport_rejects_raw_path_aliases_before_opening(
     monkeypatch.setattr(urllib.request, "build_opener", unexpected_open)
     request = urllib.request.Request(f"{BASE}{path}")
     with pytest.raises(DiscourseError):
-        client._urlopen(request, 30, base_url=f"{BASE}/forum")
+        client._urlopen(request, 30, base_url=f"{BASE}/forum", budget=client.ReadBudget())
 
 
 def _serve_post_variant(

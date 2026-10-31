@@ -44,6 +44,10 @@ class DiscourseError(Exception):
     """Raised when the Discourse bridge cannot complete a request."""
 
 
+class RequestBudgetError(DiscourseError):
+    """Raised when a read needs more request attempts than its budget allows."""
+
+
 @dataclass
 class ReadBudget:
     """Request attempts and consumed response-body bytes for one command."""
@@ -56,7 +60,11 @@ class ReadBudget:
     def start_request(self) -> None:
         """Charge one permitted attempt before it reaches the transport."""
         if self.requests >= self.max_requests:
-            raise DiscourseError(f"Discourse read budget exhausted: {self.max_requests} HTTP requests")
+            raise RequestBudgetError(f"Discourse read budget exhausted: {self.max_requests} HTTP requests")
+        if self.body_bytes >= self.max_body_bytes:
+            raise DiscourseError(
+                f"Discourse read budget exhausted: {self.max_body_bytes} response-body bytes"
+            )
         self.requests += 1
 
     def read_body(self, response: Any) -> bytearray:
@@ -188,7 +196,7 @@ def _is_under_path(path: str, base_path: str) -> bool:
 
 @dataclass(frozen=True)
 class DiscourseConfig:
-    """Environment-derived Discourse bridge configuration."""
+    """Frozen settings with a mutable read budget shared by operations on this instance."""
 
     base_url: str
     api_key: str | None
@@ -197,7 +205,7 @@ class DiscourseConfig:
 
 
 def load_config() -> DiscourseConfig:
-    """Load the bridge configuration from environment variables."""
+    """Load environment settings with a fresh budget for one command."""
     raw_url = os.environ.get("DISCOURSE_URL", "").strip()
     if not raw_url:
         raise DiscourseError("DISCOURSE_URL is required (the forum's https:// base URL)")
@@ -250,9 +258,7 @@ def api_url(config: DiscourseConfig, path: str, params: Mapping[str, QueryValue]
     return url
 
 
-def _urlopen(
-    request: urllib.request.Request, timeout: float, *, base_url: str, budget: ReadBudget | None = None
-) -> Any:
+def _urlopen(request: urllib.request.Request, timeout: float, *, base_url: str, budget: ReadBudget) -> Any:
     """Open a GET with the configured forum boundary (patched in tests)."""
     handler = SameOriginRedirectHandler(base_url, budget)
     handler.check_request(request)
@@ -302,6 +308,8 @@ def _http_error_message(exc: urllib.error.HTTPError, budget: ReadBudget) -> str:
         return f"{message} (rate limited; retry after {hint or 'a while'})"
     try:
         body = json.loads(budget.read_body(exc).decode("utf-8"))
+    except DiscourseError:
+        return f"{message} (error body exceeded the remaining read budget)"
     except (OSError, http.client.HTTPException, UnicodeDecodeError, json.JSONDecodeError):
         return message
     errors = body.get("errors") if isinstance(body, dict) else None

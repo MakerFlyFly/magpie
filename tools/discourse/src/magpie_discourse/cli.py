@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from magpie_discourse import listing, topics
-from magpie_discourse.client import load_config
+from magpie_discourse.client import DiscourseError, RequestBudgetError, load_config
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -39,7 +39,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         topic_id = topics.parse_topic_ref(args.topic, config)
         result = topics.fetch_topic(config, topic_id, max_posts=args.max_posts)
     elif args.subcommand == "topic" and args.topic_action == "list":
-        result = listing.list_topics(config, args.category, since=args.since, limit=args.limit)
+        try:
+            result = listing.list_topics(config, args.category, since=args.since, limit=args.limit)
+        except RequestBudgetError as exc:
+            raise DiscourseError(f"{exc}; lower --limit or use a newer --since") from exc
     else:  # pragma: no cover - argparse rejects anything else
         raise AssertionError(f"unhandled command {args}")
 
@@ -64,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=topics.DEFAULT_MAX_POSTS,
         help=f"Read at most this many posts (default {topics.DEFAULT_MAX_POSTS}); "
-        "a longer topic is returned with truncated: true.",
+        "a longer topic is returned with truncated: true only if the requested read fits the shared budgets.",
     )
     topic_list = topic_subparsers.add_parser(
         "list", help="List category topics by latest activity, optionally since a cutoff."
@@ -79,6 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=listing.DEFAULT_LIMIT,
-        help=f"Return at most this many unique topics (default {listing.DEFAULT_LIMIT}); look ahead to prove truncation.",
+        help=f"Return at most this many unique topics (default {listing.DEFAULT_LIMIT}); "
+        "look ahead to prove truncation. Shared read budgets still apply.",
     )
     return parser

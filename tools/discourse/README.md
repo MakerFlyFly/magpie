@@ -121,7 +121,29 @@ Each command shares a budget of 64 HTTP request attempts and 32 MiB
 (33,554,432 bytes) of consumed response bodies.
 Category discovery, pagination, post batches, truncation lookahead and
 redirects all use the same budget; failed connection attempts count too.
-The next request is refused before transmission when the request allowance is spent.
+A new request is refused before transmission when either allowance is spent.
+
+After validating the initial topic response, topic view computes the minimum
+number of batches needed for the actual missing posts.
+If those batches cannot fit the remaining request allowance, it fails before
+fetching any batch and suggests lowering `--max-posts`.
+This check does not reserve requests; redirects can still consume the remaining allowance later.
+For list request-budget failures, the error suggests a lower `--limit` or a newer `--since`.
+
+Effective capacity depends on the response, not just the requested count.
+For example, with 20 requested posts in the initial response, batches of 20 and
+no redirects, 64 requests can retrieve 1280 posts if the byte allowance also permits it.
+A higher `--max-posts` remains valid when fewer posts need fetching.
+For lists, one category request plus 63 pages of 30 unique matching topics can
+return 1889 topics with an extra match proving truncation.
+If page 63 ends the list instead, 1890 topics fit without truncation.
+Overlapping pages, redirects and the byte allowance can reduce these capacities.
+
+The CLI creates a new `DiscourseConfig` through `load_config()` for each invocation.
+Python callers reusing a config share its mutable budget across reads, including
+calls made through `dataclasses.replace(config, ...)` unless a new budget is supplied.
+Construct a new config or call `load_config()` for an independent operation;
+keep the same config when combining reads into one operation.
 
 Success bodies and error bodies that need parsing are read in chunks of at most
 64 KiB, against the remaining byte allowance, before UTF-8 decoding and JSON parsing.
@@ -133,9 +155,12 @@ process-memory limit, since decoded JSON and result objects also occupy memory.
 
 Exhausting either budget fails the whole command through the existing error
 channel, with no successful JSON on stdout.
+If an HTTP error body exceeds the byte allowance, the error retains the HTTP
+status and notes that the error body exceeded the remaining read budget.
 `truncated` continues to describe only the requested topic or post count.
 Commands within the budgets retain their existing output.
-These limits are internal defaults, with no CLI or environment overrides.
+These limits are internal engineering defaults, with no CLI or environment overrides.
+Keeping them fixed keeps this budget slice small; large otherwise-valid reads can fail.
 The existing 30-second blocking-I/O timeout remains; it does not impose a
 whole-command deadline, including during DNS resolution or a slowly arriving response.
 There are no automatic retries.

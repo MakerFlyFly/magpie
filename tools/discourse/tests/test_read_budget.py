@@ -27,12 +27,13 @@ import socket
 import urllib.error
 import urllib.request
 import urllib.response
+from dataclasses import replace
 from email.message import Message
 from typing import Any
 
 import pytest
 
-from magpie_discourse import cli, client
+from magpie_discourse import cli, client, topics
 from magpie_discourse import main as package_main
 
 BASE = "https://forum.example.test"
@@ -72,30 +73,31 @@ def posts(ids: list[int]) -> list[dict[str, Any]]:
     ]
 
 
-def topic(ids: list[int]) -> bytes:
+def topic(ids: list[int], *, initial: int = 1) -> bytes:
     return encoded(
         {
             "id": 42,
             "title": "Proposal",
             "posts_count": len(ids),
-            "post_stream": {"stream": ids, "posts": posts(ids[:1])},
+            "post_stream": {"stream": ids, "posts": posts(ids[:initial])},
         }
     )
 
 
-def page(topic_id: int, more: str | None = None) -> bytes:
+def page(topic_id: int, more: str | None = None, *, count: int = 1) -> bytes:
     return encoded(
         {
             "topic_list": {
                 "topics": [
                     {
-                        "id": topic_id,
+                        "id": topic_id + offset,
                         "title": "Proposal",
                         "posts_count": 1,
                         "created_at": DATE,
                         "bumped_at": DATE,
                         "pinned": False,
                     }
+                    for offset in range(count)
                 ],
                 "more_topics_url": more,
             }
@@ -254,13 +256,28 @@ def test_redirect_status_without_location_keeps_bounded_error_body(monkeypatch: 
     assert bodies[0].closed
 
 
-def test_error_body_shares_the_remaining_allowance(monkeypatch: pytest.MonkeyPatch) -> None:
-    _, bodies = serve(monkeypatch, [b"{}", (403, {}, encoded({"errors": ["denied"]}))])
-    config = configured(max_body_bytes=5)
+@pytest.mark.parametrize(
+    ("status", "body", "allowance"),
+    [(403, encoded({"errors": ["denied"]}), 5), (502, b"<html>" + b"x" * 5000 + b"</html>", 1000)],
+    ids=["403-json", "502-html"],
+)
+def test_error_body_shares_the_remaining_allowance(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status: int,
+    body: bytes,
+    allowance: int,
+) -> None:
+    _, bodies = serve(monkeypatch, [b"{}", (status, {}, body)])
+    config = configured(max_body_bytes=allowance)
     client.get_json(config, "/latest.json")
-    with pytest.raises(client.DiscourseError, match="5 response-body bytes"):
-        client.get_json(config, "/latest.json")
-    assert sum(body.consumed for body in bodies) == 6
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    assert package_main(["topic", "view", "42"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert f"HTTP {status}" in output.err
+    assert "error body exceeded the remaining read budget" in output.err
+    assert sum(body.consumed for body in bodies) == allowance + 1
     assert all(body.closed for body in bodies)
 
 
@@ -275,20 +292,26 @@ def test_429_uses_headers_and_closes_without_reading_body(monkeypatch: pytest.Mo
 def test_post_batches_share_budget_and_never_print_partial_success(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], dimension: str
 ) -> None:
-    first = topic(list(range(1, 43)))
     batch = encoded({"post_stream": {"posts": posts(list(range(2, 22)))}})
-    requests, bodies = serve(monkeypatch, [first, batch])
-    config = (
-        configured(max_requests=2)
-        if dimension == "requests"
-        else configured(max_body_bytes=len(first) + len(batch) - 1)
-    )
+    if dimension == "requests":
+        # Two batches fit after the initial read; an extra redirect later exhausts the budget.
+        first = topic(list(range(1, 23)))
+        replies: list[Reply] = [first, batch, (302, {"Location": "/last-batch.json"}, b"unused")]
+        config = configured(max_requests=3)
+        expected_requests = 3
+    else:
+        first = topic(list(range(1, 43)))
+        replies = [first, batch]
+        config = configured(max_body_bytes=len(first) + len(batch) - 1)
+        expected_requests = 2
+    requests, bodies = serve(monkeypatch, replies)
     monkeypatch.setattr(cli, "load_config", lambda: config)
     assert package_main(["topic", "view", "42"]) == 1
     output = capsys.readouterr()
     assert output.out == ""
     assert "magpie-discourse error: Discourse read budget exhausted" in output.err
-    assert len(requests) == 2
+    assert len(requests) == expected_requests
+    assert bodies[1].consumed > 0
     assert all(body.closed for body in bodies)
 
 
@@ -310,6 +333,7 @@ def test_category_pages_and_lookahead_share_request_budget(
     if allowance == 2:
         assert status == 1 and output.out == ""
         assert "read budget exhausted" in output.err
+        assert "--limit" in output.err and "--since" in output.err
     else:
         assert status == 0 and output.err == ""
         result = json.loads(output.out)
@@ -343,4 +367,201 @@ def test_bounded_reads_still_reject_premature_eof_after_valid_json(monkeypatch: 
     monkeypatch.setattr(client, "_urlopen", lambda *args, **kwargs: response)
     with pytest.raises(client.DiscourseError, match="ended before its declared Content-Length"):
         client.get_json(configured(), "/latest.json")
+    assert response.isclosed()
+
+
+def view_replies(total: int, max_posts: int, initial: int) -> list[Reply]:
+    ids = list(range(1, total + 1))
+    missing = ids[initial:max_posts]
+    replies: list[Reply] = [topic(ids, initial=initial)]
+    replies.extend(
+        encoded({"post_stream": {"posts": posts(missing[start : start + 20])}})
+        for start in range(0, len(missing), 20)
+    )
+    return replies
+
+
+@pytest.mark.parametrize(("max_posts", "expected_status"), [(1280, 0), (1281, 1), (2000, 1)])
+def test_topic_preflight_rejects_known_impossible_batches(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], max_posts: int, expected_status: int
+) -> None:
+    requests, bodies = serve(monkeypatch, view_replies(3000, max_posts, 20))
+    config = configured()
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    assert package_main(["topic", "view", "42", "--max-posts", str(max_posts)]) == expected_status
+    output = capsys.readouterr()
+    assert all(body.closed for body in bodies)
+    if expected_status:
+        assert len(requests) == 1
+        assert output.out == ""
+        needed = (max_posts - 20 + 19) // 20
+        assert f"at least {needed} more HTTP requests" in output.err
+        assert "63 remain" in output.err
+        assert "lower --max-posts" in output.err
+    else:
+        assert len(requests) == 64
+        result = json.loads(output.out)
+        assert len(result["messages"]) == 1280 and result["truncated"] is True
+        assert output.err == ""
+
+
+@pytest.mark.parametrize(
+    ("total", "max_posts", "initial", "allowance", "expected_requests"),
+    [(40, 2000, 20, 64, 2), (3000, 1281, 40, 64, 64), (20, 2000, 20, 1, 1)],
+)
+def test_topic_preflight_uses_actual_missing_posts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    total: int,
+    max_posts: int,
+    initial: int,
+    allowance: int,
+    expected_requests: int,
+) -> None:
+    requests, bodies = serve(monkeypatch, view_replies(total, max_posts, initial))
+    monkeypatch.setattr(cli, "load_config", lambda: configured(max_requests=allowance))
+    assert package_main(["topic", "view", "42", "--max-posts", str(max_posts)]) == 0
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert len(result["messages"]) == min(total, max_posts)
+    assert result["truncated"] is (total > max_posts)
+    assert output.err == ""
+    assert len(requests) == expected_requests
+    assert all(body.closed for body in bodies)
+
+
+@pytest.mark.parametrize(("allowance", "expected_status"), [(3, 1), (4, 0)])
+def test_topic_preflight_counts_initial_redirects_without_reserving_requests(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], allowance: int, expected_status: int
+) -> None:
+    replies: list[Reply] = [(302, {"Location": "/t/proposal/42.json"}, b"unused")]
+    replies.extend(view_replies(41, 41, 20))
+    requests, bodies = serve(monkeypatch, replies)
+    monkeypatch.setattr(cli, "load_config", lambda: configured(max_requests=allowance))
+    assert package_main(["topic", "view", "42"]) == expected_status
+    output = capsys.readouterr()
+    if expected_status:
+        assert len(requests) == 2 and output.out == ""
+        assert "at least 2 more HTTP requests" in output.err
+        assert "1 remain" in output.err and "--max-posts" in output.err
+    else:
+        assert len(requests) == 4 and output.err == ""
+        assert len(json.loads(output.out)["messages"]) == 41
+    assert bodies[0].read_sizes == []
+    assert all(body.closed for body in bodies)
+
+
+@pytest.mark.parametrize(
+    ("limit", "more_after_last_page", "expected_status"),
+    [(1889, True, 0), (1890, True, 1), (1890, False, 0)],
+)
+def test_list_capacity_depends_on_end_signal_and_lookahead(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    limit: int,
+    more_after_last_page: bool,
+    expected_status: int,
+) -> None:
+    replies: list[Reply] = [encoded({"category": CATEGORY})]
+    replies.extend(
+        page(1 + number * 30, "/next" if number < 62 or more_after_last_page else None, count=30)
+        for number in range(63)
+    )
+    requests, bodies = serve(monkeypatch, replies)
+    monkeypatch.setattr(cli, "load_config", configured)
+    assert package_main(["topic", "list", "--category", "7", "--limit", str(limit)]) == expected_status
+    output = capsys.readouterr()
+    assert len(requests) == 64
+    assert all(body.closed for body in bodies)
+    if expected_status:
+        assert output.out == ""
+        assert "--limit" in output.err and "--since" in output.err
+    else:
+        result = json.loads(output.out)
+        assert len(result["threads"]) == limit
+        assert result["truncated"] is more_after_last_page
+        assert output.err == ""
+
+
+@pytest.mark.parametrize(
+    ("reply", "body_limit", "expected"),
+    [
+        ((403, {}, encoded({"errors": ["denied"]})), 1000, "HTTP 403"),
+        (urllib.error.URLError("offline"), 1000, "offline"),
+        (b"<html>not JSON</html>", 1000, "not JSON"),
+        (encoded({"category": CATEGORY}), 1, "response-body bytes"),
+    ],
+)
+def test_list_count_hint_is_not_added_to_other_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reply: Reply,
+    body_limit: int,
+    expected: str,
+) -> None:
+    requests, bodies = serve(monkeypatch, [reply])
+    monkeypatch.setattr(cli, "load_config", lambda: configured(max_requests=1, max_body_bytes=body_limit))
+    assert package_main(["topic", "list", "--category", "7"]) == 1
+    output = capsys.readouterr()
+    assert output.out == "" and expected in output.err
+    assert "--limit" not in output.err and "--since" not in output.err
+    assert len(requests) == 1 and all(body.closed for body in bodies)
+
+
+@pytest.mark.parametrize("allowance", [1, 2])
+def test_spent_byte_budget_blocks_the_next_request(monkeypatch: pytest.MonkeyPatch, allowance: int) -> None:
+    requests, bodies = serve(monkeypatch, [b"{}"])
+    config = configured(max_body_bytes=allowance)
+    if allowance == 1:
+        with pytest.raises(client.DiscourseError, match="response-body bytes"):
+            client.get_json(config, "/latest.json")
+    else:
+        assert client.get_json(config, "/latest.json") == {}
+    with pytest.raises(client.DiscourseError, match="response-body bytes"):
+        client.get_json(config, "/latest.json")
+    assert len(requests) == config.budget.requests == 1
+    assert bodies[0].closed
+
+
+def test_reused_and_replaced_configs_share_budget_but_fresh_configs_do_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests, bodies = serve(monkeypatch, [topic([1])])
+    config = configured(max_requests=2)
+    topics.fetch_topic(config, 42)
+    topics.fetch_topic(replace(config), 42)
+    with pytest.raises(client.DiscourseError, match="2 HTTP requests"):
+        topics.fetch_topic(config, 42)
+    topics.fetch_topic(client.DiscourseConfig(BASE, None, None), 42)
+    assert len(requests) == 3
+    assert all(body.closed for body in bodies)
+
+
+@pytest.mark.parametrize("terminated", [False, True])
+def test_chunked_response_requires_terminator_even_after_valid_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], terminated: bool
+) -> None:
+    body = topic([])
+    raw = (
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        + f"{len(body):x}\r\n".encode()
+        + body
+        + b"\r\n"
+        + (b"0\r\n\r\n" if terminated else b"")
+    )
+
+    class FakeSocket:
+        def makefile(self, *args: Any, **kwargs: Any) -> io.BytesIO:
+            return io.BytesIO(raw)
+
+    response = http.client.HTTPResponse(FakeSocket())  # type: ignore[arg-type]
+    response.begin()
+    monkeypatch.setattr(client, "_urlopen", lambda *args, **kwargs: response)
+    monkeypatch.setattr(cli, "load_config", configured)
+    assert package_main(["topic", "view", "42"]) == (0 if terminated else 1)
+    output = capsys.readouterr()
+    if terminated:
+        assert json.loads(output.out)["thread_id"] == "42" and output.err == ""
+    else:
+        assert output.out == "" and "Failed to read the Discourse response" in output.err
     assert response.isclosed()

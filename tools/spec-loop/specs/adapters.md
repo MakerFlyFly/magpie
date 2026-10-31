@@ -257,8 +257,10 @@ by swapping the adapter, not the skill.
   and 32 MiB of consumed response-body bytes.
   Success and parsed error bodies use bounded reads; unused redirect bodies are closed without reading.
   Budget exhaustion fails without successful JSON and does not change count-based truncation.
+  Topic reads reject a known request-budget shortfall before fetching missing-post batches;
+  HTTP failures retain their status if the error body exceeds the byte allowance.
   The limits are internal defaults; the existing 30-second I/O timeout is not a total-duration deadline.
-  Received pages are strictly validated; malformed data or failed requests produce no partial output. Lists are not consistent snapshots and have no pagination budget.
+  Received pages are strictly validated; malformed data or failed requests produce no partial output. Lists are not consistent snapshots.
   Only GET requests are permitted. Search,
   user activity, guarded writes and the remaining mail-archive verbs are
   tracked in #307.
