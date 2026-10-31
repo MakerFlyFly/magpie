@@ -310,15 +310,21 @@ def test_post_batches_share_budget_and_never_print_partial_success(
     output = capsys.readouterr()
     assert output.out == ""
     assert "magpie-discourse error: Discourse read budget exhausted" in output.err
+    assert output.err.count("lower --max-posts") == (1 if dimension == "requests" else 0)
     assert len(requests) == expected_requests
     assert bodies[1].consumed > 0
     assert all(body.closed for body in bodies)
 
 
+@pytest.mark.parametrize("since", [None, DATE])
 @pytest.mark.parametrize("category", ["7", "dev"])
 @pytest.mark.parametrize("allowance", [2, 3])
 def test_category_pages_and_lookahead_share_request_budget(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], category: str, allowance: int
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    category: str,
+    allowance: int,
+    since: str | None,
 ) -> None:
     category_data = (
         {"category": CATEGORY} if category == "7" else {"category_list": {"categories": [CATEGORY]}}
@@ -326,14 +332,18 @@ def test_category_pages_and_lookahead_share_request_budget(
     requests, bodies = serve(monkeypatch, [encoded(category_data), page(42, "/next"), page(43)])
     config = configured(max_requests=allowance)
     monkeypatch.setattr(cli, "load_config", lambda: config)
-    status = package_main(["topic", "list", "--category", category, "--limit", "1"])
+    args = ["topic", "list", "--category", category, "--limit", "1"]
+    if since is not None:
+        args.extend(["--since", since])
+    status = package_main(args)
     output = capsys.readouterr()
     assert len(requests) == allowance
     assert all(body.closed for body in bodies)
     if allowance == 2:
         assert status == 1 and output.out == ""
         assert "read budget exhausted" in output.err
-        assert "--limit" in output.err and "--since" in output.err
+        assert output.err.count("lower --limit") == 1
+        assert output.err.count("set --since to a more recent cutoff") == 1
     else:
         assert status == 0 and output.err == ""
         result = json.loads(output.out)
@@ -381,6 +391,17 @@ def view_replies(total: int, max_posts: int, initial: int) -> list[Reply]:
     return replies
 
 
+def test_library_preflight_uses_parameter_names_without_cli_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests, bodies = serve(monkeypatch, [topic([1, 2])])
+    with pytest.raises(client.RequestBudgetError, match="at least 1 more HTTP requests") as exc:
+        topics.fetch_topic(configured(max_requests=1), 42, max_posts=2)
+    assert "max_posts" in str(exc.value)
+    assert "--max-posts" not in str(exc.value)
+    assert len(requests) == 1 and bodies[0].closed
+
+
 @pytest.mark.parametrize(("max_posts", "expected_status"), [(1280, 0), (1281, 1), (2000, 1)])
 def test_topic_preflight_rejects_known_impossible_batches(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], max_posts: int, expected_status: int
@@ -397,7 +418,7 @@ def test_topic_preflight_rejects_known_impossible_batches(
         needed = (max_posts - 20 + 19) // 20
         assert f"at least {needed} more HTTP requests" in output.err
         assert "63 remain" in output.err
-        assert "lower --max-posts" in output.err
+        assert output.err.count("lower --max-posts") == 1
     else:
         assert len(requests) == 64
         result = json.loads(output.out)
@@ -483,6 +504,7 @@ def test_list_capacity_depends_on_end_signal_and_lookahead(
         assert output.err == ""
 
 
+@pytest.mark.parametrize("action", ["view", "list"])
 @pytest.mark.parametrize(
     ("reply", "body_limit", "expected"),
     [
@@ -492,19 +514,21 @@ def test_list_capacity_depends_on_end_signal_and_lookahead(
         (encoded({"category": CATEGORY}), 1, "response-body bytes"),
     ],
 )
-def test_list_count_hint_is_not_added_to_other_failures(
+def test_count_hints_are_not_added_to_other_failures(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     reply: Reply,
     body_limit: int,
     expected: str,
+    action: str,
 ) -> None:
     requests, bodies = serve(monkeypatch, [reply])
     monkeypatch.setattr(cli, "load_config", lambda: configured(max_requests=1, max_body_bytes=body_limit))
-    assert package_main(["topic", "list", "--category", "7"]) == 1
+    args = ["topic", "view", "42"] if action == "view" else ["topic", "list", "--category", "7"]
+    assert package_main(args) == 1
     output = capsys.readouterr()
     assert output.out == "" and expected in output.err
-    assert "--limit" not in output.err and "--since" not in output.err
+    assert all(flag not in output.err for flag in ("--max-posts", "--limit", "--since"))
     assert len(requests) == 1 and all(body.closed for body in bodies)
 
 

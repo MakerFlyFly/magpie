@@ -50,7 +50,7 @@ class RequestBudgetError(DiscourseError):
 
 @dataclass
 class ReadBudget:
-    """Request attempts and consumed response-body bytes for one command."""
+    """Mutable request and response-body accounting shared through DiscourseConfig."""
 
     max_requests: int = DEFAULT_MAX_REQUESTS
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES

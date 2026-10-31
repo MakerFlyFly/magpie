@@ -97,8 +97,8 @@ def fetch_topic(config: DiscourseConfig, topic_id: int, max_posts: int = DEFAULT
     remaining_requests = config.budget.max_requests - config.budget.requests
     if requests_needed > remaining_requests:
         raise RequestBudgetError(
-            f"Discourse topic needs at least {requests_needed} more HTTP requests, "
-            f"but {remaining_requests} remain in the read budget; lower --max-posts"
+            f"Discourse topic read for max_posts needs at least {requests_needed} more HTTP requests, "
+            f"but {remaining_requests} remain in the read budget"
         )
     for start in range(0, len(missing), POSTS_CHUNK_SIZE):
         chunk = missing[start : start + POSTS_CHUNK_SIZE]

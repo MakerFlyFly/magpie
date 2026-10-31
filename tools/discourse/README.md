@@ -126,13 +126,14 @@ A new request is refused before transmission when either allowance is spent.
 After validating the initial topic response, topic view computes the minimum
 number of batches needed for the actual missing posts.
 If those batches cannot fit the remaining request allowance, it fails before
-fetching any batch and suggests lowering `--max-posts`.
+fetching any batch.
 This check does not reserve requests; redirects can still consume the remaining allowance later.
-For list request-budget failures, the error suggests a lower `--limit` or a newer `--since`.
+For view request-budget failures, the CLI suggests lowering `--max-posts`.
+For list request-budget failures, the CLI suggests lowering `--limit` or setting `--since` to a more recent cutoff.
 
 Effective capacity depends on the response, not just the requested count.
-For example, with 20 requested posts in the initial response, batches of 20 and
-no redirects, 64 requests can retrieve 1280 posts if the byte allowance also permits it.
+For example, with the first 20 posts of the stream already included in the initial response,
+batches of 20 and no redirects, 64 requests can retrieve 1280 posts if the byte allowance also permits it.
 A higher `--max-posts` remains valid when fewer posts need fetching.
 For lists, one category request plus 63 pages of 30 unique matching topics can
 return 1889 topics with an extra match proving truncation.

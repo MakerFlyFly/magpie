@@ -37,12 +37,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     result: Any
     if args.subcommand == "topic" and args.topic_action == "view":
         topic_id = topics.parse_topic_ref(args.topic, config)
-        result = topics.fetch_topic(config, topic_id, max_posts=args.max_posts)
+        try:
+            result = topics.fetch_topic(config, topic_id, max_posts=args.max_posts)
+        except RequestBudgetError as exc:
+            raise DiscourseError(f"{exc}; lower --max-posts") from exc
     elif args.subcommand == "topic" and args.topic_action == "list":
         try:
             result = listing.list_topics(config, args.category, since=args.since, limit=args.limit)
         except RequestBudgetError as exc:
-            raise DiscourseError(f"{exc}; lower --limit or use a newer --since") from exc
+            raise DiscourseError(f"{exc}; lower --limit or set --since to a more recent cutoff") from exc
     else:  # pragma: no cover - argparse rejects anything else
         raise AssertionError(f"unhandled command {args}")
 
