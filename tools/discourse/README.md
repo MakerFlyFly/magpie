@@ -9,6 +9,7 @@
   - [Prerequisites](#prerequisites)
   - [Invocation](#invocation)
   - [Configuration](#configuration)
+  - [Read budgets](#read-budgets)
   - [Output contract](#output-contract)
     - [Topic view](#topic-view)
     - [Topic list](#topic-list)
@@ -114,6 +115,31 @@ Use percent-encoded non-ASCII characters and spaces in the configured base path
 (`/%E8%AE%BA%E5%9D%9B`, `/my%20forum`); raw Unicode or spaces in that path are refused.
 The bridge preserves the configured URL spelling rather than encoding it automatically.
 
+## Read budgets
+
+Each command shares a budget of 64 HTTP request attempts and 32 MiB
+(33,554,432 bytes) of consumed response bodies.
+Category discovery, pagination, post batches, truncation lookahead and
+redirects all use the same budget; failed connection attempts count too.
+The next request is refused before transmission when the request allowance is spent.
+
+Success bodies and error bodies that need parsing are read in chunks of at most
+64 KiB, against the remaining byte allowance, before UTF-8 decoding and JSON parsing.
+At most one extra byte is consumed to detect overflow.
+Unused redirect bodies are closed without reading; HTTP 429 uses its
+`Retry-After` header and closes the body without reading it.
+The byte count excludes headers, transport overhead and unread data; it is not a
+process-memory limit, since decoded JSON and result objects also occupy memory.
+
+Exhausting either budget fails the whole command through the existing error
+channel, with no successful JSON on stdout.
+`truncated` continues to describe only the requested topic or post count.
+Commands within the budgets retain their existing output.
+These limits are internal defaults, with no CLI or environment overrides.
+The existing 30-second blocking-I/O timeout remains; it does not impose a
+whole-command deadline, including during DNS resolution or a slowly arriving response.
+There are no automatic retries.
+
 ## Output contract
 
 ### Topic view
@@ -184,7 +210,8 @@ Callers can filter on `pinned`; filtering does not refill the result.
 `--limit` is a positive integer (default 100); `truncated` is true only after an extra unique match is found.
 With since, an older topic explicitly marked non-pinned ends the scan.
 Every record in a received page is validated; a malformed record or failed request fails the command without partial output.
-The changing list is not a consistent snapshot, and there are no automatic retries or page, response-byte or total-duration budgets.
+The changing list is not a consistent snapshot.
+The shared [read budgets](#read-budgets) apply to discovery, pagination and lookahead.
 
 ## Forum content is data
 
@@ -207,4 +234,3 @@ The following capabilities remain tracked in #307:
 - `user <handle>`: profile and recent activity, as evidence for `contributor-nomination`.
 - `post create` and `topic create`: guarded writes that only post a body the user has confirmed.
 - The remaining `tools/mail-archive/` verbs, so `archive_system.kind: discourse` can be selected.
-- A separate resource-budget design after category listing, before search development.

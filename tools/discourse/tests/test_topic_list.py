@@ -76,7 +76,9 @@ def serve(
     requests: list[urllib.request.Request] = []
     replies = {"/c/7/show.json": {"category": CATEGORY}, **routes}
 
-    def open_request(request: urllib.request.Request, timeout: float, *, base_url: str) -> io.BytesIO:
+    def open_request(
+        request: urllib.request.Request, timeout: float, *, base_url: str, budget: client.ReadBudget
+    ) -> io.BytesIO:
         assert timeout == 30
         requests.append(request)
         parsed = urllib.parse.urlsplit(request.full_url)

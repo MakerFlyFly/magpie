@@ -253,6 +253,11 @@ by swapping the adapter, not the skill.
   Results preserve pinned/descending `bumped_at` order; since is inclusive, dates mean midnight UTC and timestamps require a timezone with at most microsecond precision.
   Summaries reuse `thread_summary` fields plus activity metadata; `last_message_date` maps only `last_posted_at`, preserving missing/null without fallback.
   Pinned topics count toward the positive limit (default 100); only an extra unique match proves truncation, and an older explicitly non-pinned topic ends a since scan.
+  All reads in a command share limits of 64 HTTP request attempts (including redirects)
+  and 32 MiB of consumed response-body bytes.
+  Success and parsed error bodies use bounded reads; unused redirect bodies are closed without reading.
+  Budget exhaustion fails without successful JSON and does not change count-based truncation.
+  The limits are internal defaults; the existing 30-second I/O timeout is not a total-duration deadline.
   Received pages are strictly validated; malformed data or failed requests produce no partial output. Lists are not consistent snapshots and have no pagination budget.
   Only GET requests are permitted. Search,
   user activity, guarded writes and the remaining mail-archive verbs are
