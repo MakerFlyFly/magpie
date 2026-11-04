@@ -33,10 +33,14 @@ def _has_positive_ids(row: Any, *fields: str) -> bool:
     return isinstance(row, dict) and all(type(row.get(key)) is int and row[key] > 0 for key in fields)
 
 
-def _read_page(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[int, str], bool]:
+def _read_page(payload: dict[str, Any], page: int) -> tuple[list[dict[str, Any]], dict[int, str], bool]:
     group = payload.get("grouped_search_result")
     if group is None and "grouped_search_result" in payload:
-        raise DiscourseError("No searchable terms remain in this query. Try adding a longer keyword.")
+        if page == 1:
+            raise DiscourseError(
+                "No searchable terms remain in this query. Try adding a keyword or using a longer one."
+            )
+        raise DiscourseError(f"Discourse returned a null search result group on page {page}.")
     if not isinstance(group, dict):
         raise DiscourseError("Discourse returned invalid grouped search results")
     error = group.get("error")
@@ -85,7 +89,7 @@ def search_topics(config: DiscourseConfig, query: str, *, limit: int = DEFAULT_L
     page = 1
     while True:
         payload = get_json(config, "/search.json", {"q": query, "page": page})
-        posts, titles, more = _read_page(payload)
+        posts, titles, more = _read_page(payload, page)
         fingerprint = tuple(post["id"] for post in posts)
         if more and (not posts or fingerprint in seen_pages):
             raise DiscourseError("Cannot continue Discourse search: empty or repeated complete page")

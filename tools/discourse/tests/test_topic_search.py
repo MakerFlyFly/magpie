@@ -152,15 +152,23 @@ def test_query_starting_with_dash_after_option_terminator(
 
 
 @pytest.mark.parametrize("query", ["a b c", "in:title"])
-def test_null_group_suggests_a_longer_keyword(
+def test_null_group_on_first_page_suggests_adding_or_lengthening_a_keyword(
     monkeypatch: pytest.MonkeyPatch, capsys: Any, query: str
 ) -> None:
     requested = serve(monkeypatch, {"grouped_search_result": None}, query=query)
     code, out, err = run(capsys, query)
     assert (code, out, requested) == (1, "", [1])
     assert err == (
-        "magpie-discourse error: No searchable terms remain in this query. Try adding a longer keyword.\n"
+        "magpie-discourse error: No searchable terms remain in this query. "
+        "Try adding a keyword or using a longer one.\n"
     )
+
+
+def test_null_group_during_lookahead_reports_the_page(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
+    requested = serve(monkeypatch, page(post(1, 1), more=True), {"grouped_search_result": None})
+    code, out, err = run(capsys, QUERY, "--limit", "1")
+    assert (code, out, requested) == (1, "", [1, 2])
+    assert err == "magpie-discourse error: Discourse returned a null search result group on page 2.\n"
 
 
 @pytest.mark.parametrize("payload", [{}, {"grouped_search_result": []}])

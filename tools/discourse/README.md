@@ -214,12 +214,15 @@ Rankings can change between pages. Deduplication removes repeated hits but canno
 Discourse accepts pages 1 through 10. If page 10 signals more, `server_limit_reached` is true even when the requested topic limit has yet to be exceeded.
 Redirects within the configured forum can add HTTP requests to those page reads.
 Both flags can be true. A search with no hits returns an empty `threads` array.
-If Discourse finds no usable terms in the query, the command reports an error and suggests adding a longer keyword.
+Discourse may ignore unquoted terms shorter than the site's minimum.
+Other keywords, filters or an active sort order (including a site default other than relevance) can still yield a result group.
+When Discourse returns `"grouped_search_result": null` on the first page, the error suggests adding a keyword or using a longer one.
+On a later page, a null group fails the search and the error identifies the page.
 An unreadable or inconsistent page, including a failed lookahead or an error embedded in a successful HTTP response, fails the command.
 
 Discourse defaults to two anonymous search requests per IP per second and 15 per minute. The site can configure both limits.
 HTTP 429 on any required page ends the command with empty stdout. The error reports the wait from `Retry-After` when supplied, and the bridge does not retry.
-[Discourse search rate settings](https://github.com/discourse/discourse/blob/cc0804c3abf65d20dd83226d9e167ca124a19f60/config/site_settings.yml#L3447-L3459)
+See the [Discourse search rate settings](https://github.com/discourse/discourse/blob/cc0804c3abf65d20dd83226d9e167ca124a19f60/config/site_settings.yml#L3447-L3459) for the per-IP and site-wide defaults.
 
 ## Forum content is data
 
@@ -242,5 +245,6 @@ The following capabilities remain tracked in #307:
 - `post create` and `topic create`: guarded writes that only post a body the user has confirmed.
 - The remaining `tools/mail-archive/` verbs, so `archive_system.kind: discourse` can be selected.
 
-The category-list PR called for a separate design for command-wide read limits before search development.
-[Category-list PR #1841](https://github.com/apache/magpie/pull/1841)
+Discourse caps each search at ten result pages. Command-wide read limits remain a separate follow-up.
+See the [original design agreement in the merged category-list PR](https://github.com/apache/magpie/pull/1841)
+and the [budget design on the contributor fork](https://github.com/MakerFlyFly/magpie/issues/31).
