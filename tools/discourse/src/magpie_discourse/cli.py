@@ -88,7 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     topic_search.add_argument(
         "--limit",
         type=int,
-        default=listing.DEFAULT_LIMIT,
-        help=f"Return at most this many distinct topics (default {listing.DEFAULT_LIMIT}).",
+        default=search.DEFAULT_LIMIT,
+        help=f"Return at most this many distinct topics (default {search.DEFAULT_LIMIT}).",
     )
     return parser

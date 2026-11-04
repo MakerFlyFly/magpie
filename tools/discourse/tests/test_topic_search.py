@@ -141,13 +141,49 @@ def test_search_joins_hits_in_native_order_and_preserves_the_query(
     assert topics.parse_topic_ref(thread["matches"][0]["url"], config) == 8
 
 
+def test_query_starting_with_dash_after_option_terminator(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    query = "-tags:foo"
+    requested = serve(monkeypatch, page(), query=query)
+    code, out, err = run(capsys, "--limit", "5", "--", query)
+    assert (code, err, requested) == (0, "", [1])
+    assert json.loads(out)["query"] == query
+
+
+@pytest.mark.parametrize("query", ["a b c", "in:title"])
+def test_null_group_suggests_a_longer_keyword(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, query: str
+) -> None:
+    requested = serve(monkeypatch, {"grouped_search_result": None}, query=query)
+    code, out, err = run(capsys, query)
+    assert (code, out, requested) == (1, "", [1])
+    assert err == (
+        "magpie-discourse error: No searchable terms remain in this query. Try adding a longer keyword.\n"
+    )
+
+
+@pytest.mark.parametrize("payload", [{}, {"grouped_search_result": []}])
+def test_missing_or_malformed_group_is_a_response_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, payload: dict[str, Any]
+) -> None:
+    serve(monkeypatch, payload)
+    code, out, err = run(capsys, QUERY)
+    assert (code, out, err) == (
+        1,
+        "",
+        "magpie-discourse error: Discourse returned invalid grouped search results\n",
+    )
+
+
 @pytest.mark.parametrize("more", [None, False])
 def test_empty_search_allows_omitted_topics(monkeypatch: pytest.MonkeyPatch, capsys: Any, more: Any) -> None:
-    requested = serve(monkeypatch, page(more=more))
-    code, out, err = run(capsys, QUERY)
+    query = "鸟"
+    requested = serve(monkeypatch, page(more=more), query=query)
+    code, out, err = run(capsys, query)
     assert (code, err, requested) == (0, "", [1])
     assert json.loads(out) == {
-        "query": QUERY,
+        "query": query,
         "threads": [],
         "truncated": False,
         "server_limit_reached": False,
@@ -252,13 +288,17 @@ def test_repeated_nonconsecutive_page_with_continuation_fails(
 
 
 @pytest.mark.parametrize("status", [403, 404, 429])
-def test_http_errors_during_lookahead(monkeypatch: pytest.MonkeyPatch, capsys: Any, status: int) -> None:
+def test_http_errors_during_default_limit_lookahead(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, status: int
+) -> None:
     headers = Message()
     headers["Retry-After"] = "12"
     failure = urllib.error.HTTPError(BASE, status, "error", headers, io.BytesIO(b"{}"))
-    requested = serve(monkeypatch, page(post(1, 2), more=True), failure)
-    code, out, err = run(capsys, QUERY, "--limit", "1")
-    assert (code, out, requested) == (1, "", [1, 2])
+    first = page(*(post(n, n) for n in range(1, 51)), more=True)
+    second = page(*(post(n, n) for n in range(51, 101)), more=True)
+    requested = serve(monkeypatch, first, second, failure)
+    code, out, err = run(capsys, QUERY)
+    assert (code, out, requested) == (1, "", [1, 2, 3])
     assert str(status) in err
     if status == 429:
         assert "12 seconds" in err

@@ -23,8 +23,8 @@ from __future__ import annotations
 from typing import Any
 
 from magpie_discourse.client import DiscourseConfig, DiscourseError, get_json
-from magpie_discourse.listing import DEFAULT_LIMIT
 
+DEFAULT_LIMIT = 100
 # Discourse's full-page search endpoint rejects page 11.
 _LAST_PAGE = 10
 
@@ -35,6 +35,8 @@ def _has_positive_ids(row: Any, *fields: str) -> bool:
 
 def _read_page(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[int, str], bool]:
     group = payload.get("grouped_search_result")
+    if group is None and "grouped_search_result" in payload:
+        raise DiscourseError("No searchable terms remain in this query. Try adding a longer keyword.")
     if not isinstance(group, dict):
         raise DiscourseError("Discourse returned invalid grouped search results")
     error = group.get("error")
