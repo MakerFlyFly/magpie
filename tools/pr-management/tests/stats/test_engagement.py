@@ -41,6 +41,7 @@ def _event(kind, actor="contributor", *, label="area:docs", days_ago=1):
 
 
 @pytest.mark.parametrize("kind", EVENT_TYPES)
+# The case variant is defensive coverage, not a claim about live API casing.
 @pytest.mark.parametrize("actor", ["contributor", "CONTRIBUTOR"])
 def test_author_timeline_activity_stays_in_untriaged_backlog(kind, actor):
     ctx = make_ctx()
@@ -55,8 +56,11 @@ def test_author_timeline_activity_stays_in_untriaged_backlog(kind, actor):
     assert hero["defacto"] == 0
     assert dashboard.compute_health_rating(hero)[0] == "⚠️ Needs attention"
     recommendations = dashboard.compute_recommendations([pr], [], [], hero, 0, ctx["now"])
-    assert recommendations[0]["title"] == "Triage 1 non-draft contributor PRs older than 4 weeks"
-    assert recommendations[0]["count"] == 1
+    triage = next(
+        r for r in recommendations if r["action"] == "/magpie-pr-management:pr-triage all PR issues"
+    )
+    assert triage["priority"] == "high"
+    assert triage["count"] == 1
 
 
 @pytest.mark.parametrize("kind", EVENT_TYPES)
@@ -139,3 +143,72 @@ def test_other_human_event_with_deleted_pr_author():
     reference.classify(pr, make_ctx())
 
     assert pr["_is_engaged"] is True
+
+
+@pytest.mark.parametrize("kind", EVENT_TYPES)
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_collaborator_own_timeline_activity_remains_engagement(kind, association):
+    ctx = make_ctx()
+    pr = make_pr(1, author="maintainer", assoc=association, timeline=[_event(kind, "maintainer")])
+
+    reference.classify(pr, ctx)
+
+    assert pr["_is_engaged"] is True
+    assert pr["_is_untriaged"] is False
+    assert dashboard.compute_hero_counts([pr], ctx["now"])["defacto"] == 1
+
+
+@pytest.mark.parametrize("association", ["CONTRIBUTOR", "MEMBER"])
+@pytest.mark.parametrize("merged", [False, True])
+@pytest.mark.parametrize("typed", [False, True])
+def test_closed_pr_own_actor_remains_engagement(association, merged, typed):
+    # The real closed queries select only actor.login, without __typename.
+    event: dict[str, object] = {"actor": {"login": "author"}}
+    if typed:
+        event["__typename"] = "ClosedEvent"
+    pr = make_pr(
+        1,
+        author="author",
+        assoc=association,
+        closed_days_ago=2,
+        merged=merged,
+        include_engagement=False,
+        timeline=[event],
+    )
+    assert pr["timelineItems"]["nodes"] == [event]
+    assert not {"commits", "latestReviews", "reviewThreads"}.intersection(pr)
+
+    reference.classify(pr, make_ctx(), partial=True)
+
+    assert pr["_is_engaged"] is True
+
+
+def test_closed_pr_coverage_preserves_all_closure_actors():
+    ctx = make_ctx()
+    closed_prs = []
+    for n, (author, association, actor, merged) in enumerate(
+        [
+            ("member", "MEMBER", "member", True),
+            ("collaborator", "COLLABORATOR", "collaborator", True),
+            ("contributor", "CONTRIBUTOR", "contributor", False),
+            ("other", "CONTRIBUTOR", "maintainer", False),
+        ],
+        start=1,
+    ):
+        pr = make_pr(
+            n,
+            author=author,
+            assoc=association,
+            created_days_ago=20,
+            closed_days_ago=2,
+            merged=merged,
+            include_engagement=False,
+            timeline=[{"actor": {"login": actor}}],
+        )
+        reference.classify(pr, ctx, partial=True)
+        closed_prs.append(pr)
+
+    coverage = dashboard.compute_triage_coverage_rate(closed_prs, ctx["weeks"])
+    bucket = next(row for row in coverage if row["opened"])
+    assert bucket["opened"] == bucket["engaged"] == 4
+    assert bucket["rate"] == 100.0
