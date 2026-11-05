@@ -439,7 +439,8 @@ def classify(pr, ctx, *, partial=False):
     label_added_at = None
     for ev in pr.get("timelineItems", {}).get("nodes") or []:
         actor = (ev.get("actor") or {}).get("login")
-        if actor and not is_bot(actor):
+        # The author's own label and draft-state changes are not engagement.
+        if actor and actor.lower() != (author or "").lower() and not is_bot(actor):
             has_maintainer_event = True
         if ev.get("label", {}).get("name") == ctx["ready_label"]:
             at = parse_iso(ev.get("createdAt"))
