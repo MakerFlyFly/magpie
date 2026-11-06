@@ -142,6 +142,11 @@ These cases exercise the model's composition instructions.
 In production, `security-management issue-triage render-proposal` renders the next command deterministically;
 the [pytest handoff cases](../../../security-management/tests/test_issue_triage.py) exercise the generated command through the deduplicate selector.
 
+The PROBABLE-DUP case accepts the kept-first command in backticks or as a complete plain-text command line,
+with an optional `/` prefix, `magpie-security:` namespace, and `#` before either issue number.
+It rejects a reversed command anywhere in the comment, including a comment that also supplies the correct command.
+Command and argument boundaries prevent longer issue numbers, extra arguments, and unrelated prefixes from matching.
+
 Hard rules: no bare `#NNN` (must be clickable links); Security Model quote
 verbatim; max 3 @-mentions; DEFENSE-IN-DEPTH must say "defense-in-depth fix
 is welcome via public PR; not a CVE"; UNCERTAIN must open with "low-confidence

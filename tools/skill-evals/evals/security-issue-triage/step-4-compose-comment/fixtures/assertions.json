@@ -10,7 +10,14 @@
   "has_kept_tracker_first": {
     "field": "comment_body",
     "type": "regex",
-    "pattern": "`/?security-issue-deduplicate\\s+#?212\\s+#?250`"
+    "flags": "m",
+    "pattern": "(?<![\\w:/-])/?(?:magpie-security:)?security-issue-deduplicate\\s+#?212\\s+#?250(?=[ \\t]*(?:`|$))"
+  },
+  "has_no_reversed_dedupe_command": {
+    "field": "comment_body",
+    "type": "regex",
+    "negate": true,
+    "pattern": "(?<![\\w:/-])/?(?:magpie-security:)?security-issue-deduplicate\\s+#?250\\s+#?212(?![\\w/#-])"
   },
   "mention_handles": {
     "field": "mention_handles",
