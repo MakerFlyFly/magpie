@@ -9,8 +9,8 @@
   },
   "has_kept_tracker_first": {
     "field": "comment_body",
-    "type": "contains",
-    "substring": "`security-issue-deduplicate 212 250`"
+    "type": "regex",
+    "pattern": "`/?security-issue-deduplicate\\s+#?212\\s+#?250`"
   },
   "mention_handles": {
     "field": "mention_handles",

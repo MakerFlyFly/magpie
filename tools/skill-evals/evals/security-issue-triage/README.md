@@ -138,6 +138,10 @@ Composes the triage proposal GitHub comment from the classification result,
 Security Model verbatim quote, and @-mention routing. Expected JSON uses
 structural assertions rather than exact prose match.
 
+These cases exercise the model's composition instructions.
+In production, `security-management issue-triage render-proposal` renders the next command deterministically;
+the [pytest handoff cases](../../../security-management/tests/test_issue_triage.py) exercise the generated command through the deduplicate selector.
+
 Hard rules: no bare `#NNN` (must be clickable links); Security Model quote
 verbatim; max 3 @-mentions; DEFENSE-IN-DEPTH must say "defense-in-depth fix
 is welcome via public PR; not a CVE"; UNCERTAIN must open with "low-confidence
