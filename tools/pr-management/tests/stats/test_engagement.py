@@ -162,6 +162,8 @@ def test_collaborator_own_timeline_activity_remains_engagement(kind, association
 @pytest.mark.parametrize("merged", [False, True])
 @pytest.mark.parametrize("typed", [False, True])
 def test_closed_pr_own_actor_remains_engagement(association, merged, typed):
+    # Preserve legacy self-closure behavior for this limited change.
+    # A separate closed-PR policy fix may revise this compatibility expectation.
     # The real closed queries select only actor.login, without __typename.
     event: dict[str, object] = {"actor": {"login": "author"}}
     if typed:
@@ -184,6 +186,8 @@ def test_closed_pr_own_actor_remains_engagement(association, merged, typed):
 
 
 def test_closed_pr_coverage_preserves_all_closure_actors():
+    # Keep the legacy closed-PR metric here, including contributor self-closes.
+    # This compatibility assertion does not endorse self-closure as maintainer engagement.
     ctx = make_ctx()
     closed_prs = []
     for n, (author, association, actor, merged) in enumerate(
