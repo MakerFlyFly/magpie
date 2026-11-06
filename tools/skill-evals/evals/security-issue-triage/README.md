@@ -142,10 +142,15 @@ These cases exercise the model's composition instructions.
 In production, `security-management issue-triage render-proposal` renders the next command deterministically;
 the [pytest handoff cases](../../../security-management/tests/test_issue_triage.py) exercise the generated command through the deduplicate selector.
 
-The PROBABLE-DUP case accepts the kept-first command in backticks or as a complete plain-text command line,
-with an optional `/` prefix, `magpie-security:` namespace, and `#` before either issue number.
-It rejects a reversed command anywhere in the comment, including a comment that also supplies the correct command.
+The PROBABLE-DUP command assertions follow the selector's case-insensitive command aliases:
+an optional `/` and `magpie-security:` prefix, optional `security-` and `issue-` segments, then `dedupe` or `deduplicate`.
+The marketplace skill invocation is `/magpie-security:issue-deduplicate`.
+For these aliases with bare numeric or `#N` arguments, the case accepts the kept-first command in backticks or as a complete plain-text command line
+and rejects a reversed command, including a comment that also supplies the correct command.
 Command and argument boundaries prevent longer issue numbers, extra arguments, and unrelated prefixes from matching.
+These assertions do not normalize repository-qualified references, issue URLs, or Markdown-link arguments;
+those forms are outside this smoke test's command-direction coverage.
+The quote and reference-format flags remain model-reported; the command assertions inspect `comment_body` directly.
 
 Hard rules: no bare `#NNN` (must be clickable links); Security Model quote
 verbatim; max 3 @-mentions; DEFENSE-IN-DEPTH must say "defense-in-depth fix
