@@ -145,11 +145,14 @@ the [pytest handoff cases](../../../security-management/tests/test_issue_triage.
 The PROBABLE-DUP command assertions follow the selector's case-insensitive command aliases:
 an optional `/` and `magpie-security:` prefix, optional `security-` and `issue-` segments, then `dedupe` or `deduplicate`.
 The marketplace skill invocation is `/magpie-security:issue-deduplicate`.
-For these aliases with bare numeric or `#N` arguments, the case accepts the kept-first command in backticks or as a complete plain-text command line
+For these aliases with whitespace-separated bare numeric or `#N` arguments, the case accepts the kept-first command in backticks or as a complete plain-text command line
 and rejects a reversed command, including a comment that also supplies the correct command.
 Command and argument boundaries prevent longer issue numbers, extra arguments, and unrelated prefixes from matching.
-These assertions do not normalize repository-qualified references, issue URLs, or Markdown-link arguments;
+These assertions do not normalize comma separators, intervening words or arrows (`keep`, `drop`, `into`, `->`, `→`),
+repository-qualified references, issue URLs, or Markdown-link arguments;
 those forms are outside this smoke test's command-direction coverage.
+A supported forward command and an unsupported reversed spelling in the same comment can therefore pass.
+Plugin dispatch identity is outside these predicates' scope; the system prompt still requests `security-issue-deduplicate`.
 The quote and reference-format flags remain model-reported; the command assertions inspect `comment_body` directly.
 
 Hard rules: no bare `#NNN` (must be clickable links); Security Model quote
