@@ -148,6 +148,7 @@ proposal, please challenge."
 | `case-1-valid-dag-scope-bypass` | VALID | `mention_handles=["@alice","@bob"]`, `has_security_model_quote=true`, `has_bare_issue_numbers=false` |
 | `case-2-not-cve-worthy-canned` | INVALID | `mention_handles=["@dave"]`, verbatim DAG-authors quote, exact canned heading named |
 | `case-3-uncertain-flag` | UNCERTAIN | "low-confidence proposal, please challenge" framing; `mention_handles=["@alice"]`; Deployment Managers verbatim quote |
+| `case-4-probable-dup-kept-first` | PROBABLE-DUP | `security-issue-deduplicate 212 250` keeps the selected tracker first; linked references and the Security Model quote remain required |
 
 ---
 

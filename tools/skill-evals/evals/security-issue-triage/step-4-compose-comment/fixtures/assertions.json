@@ -7,6 +7,11 @@
     "field": "has_security_model_quote",
     "type": "field_true"
   },
+  "has_kept_tracker_first": {
+    "field": "comment_body",
+    "type": "contains",
+    "substring": "`security-issue-deduplicate 212 250`"
+  },
   "mention_handles": {
     "field": "mention_handles",
     "type": "regex",
