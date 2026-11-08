@@ -201,9 +201,10 @@ code lands.
 - **Conservative tally.** `release-vote-tally` classifies +1/0/-1 binding
   vs non-binding against the PMC roster and refuses to count ambiguous
   votes, flagging `AMBIGUOUS, needs RM call` rather than guessing.
-  A roster voter resolved by Primary email with no Apache ID is keyed by
-  the normalised address, so email-only voters stay distinct and cannot
-  supersede one another (#1913).
+  Email-only voters stay distinct (#1913). Each such row is keyed by its
+  first listed address that resolves to it, so aliases on that row share
+  one voter identity. A repeated address resolves to the first row that
+  lists it.
   `tally.py` binds a vote only to the real mailbox of its `from` header,
   parsed as an address header: an address written into the display name
   does not count, and a `from` with several addresses or none that parses

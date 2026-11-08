@@ -89,8 +89,9 @@ class RosterRow(TypedDict):
 
 
 def parse_roster(text: str) -> list[RosterRow]:
-    """Return normalized roster rows with emails in their declared order."""
+    """Return normalized roster rows with matchable emails in their declared order."""
     rows: list[RosterRow] = []
+    claimed_emails: set[str] = set()
     header: list[str] | None = None
     for line in text.splitlines():
         if "|" not in line:
@@ -104,11 +105,13 @@ def parse_roster(text: str) -> list[RosterRow]:
             continue
         row = dict(zip(header, cells, strict=False))  # short rows leave trailing columns unset
         apache_id = row.get("apache id", "").lower()
+        # A repeated address matches only the first row that lists it.
         emails = tuple(
             email
             for part in row.get("primary email", "").split(",")
-            if (email := part.strip().strip("`").strip().lower())
+            if (email := part.strip().strip("`").strip().lower()) and email not in claimed_emails
         )
+        claimed_emails.update(emails)
         if apache_id or emails:
             rows.append({"apache_id": apache_id, "primary_emails": emails})
     return rows
@@ -164,7 +167,7 @@ def resolve_binding(sender: str, roster: list[RosterRow]) -> str | None:
 
 
 def _identity(sender: str, row: RosterRow | None) -> str:
-    """Group votes by roster ID, or by the row's first email for email-only members."""
+    """Group votes by roster ID, or by the first email that matches an email-only row."""
     if row is None:
         return "address:" + normalise_address(sender)
     if row["apache_id"]:

@@ -25,7 +25,8 @@ Each reviewer's **latest** review (by `submittedAt`) is their vote; `COMMENTED` 
 `APPROVED` is `+1`, `CHANGES_REQUESTED` is `-1`, and `DISMISSED` withdraws the vote, so an approval followed by a change request or a dismissal is never a `+1`.
 The rule counts approvals only: a `-1` is reported in `binding_minus1` and in the `[RESULT]`, and its effect on the result is that the reviewer's `+1` is gone.
 `pr_reviewers` in the output lists what decided each reviewer's vote.
-A bare GitHub login never matches the roster, so `--login-map` (a JSON object, login to roster `Primary email`, from the mapping the RM provides) maps each one before tallying; an unmapped login is non-binding.
+Before tallying, `--login-map` applies the RM's JSON mapping from each GitHub login to a single address listed in that member's `Primary email` cell.
+An unmapped login is non-binding.
 
 **The pass rule is code:** pass `approval_pr_min_approvals` to the tally as `--min-approvals <N>`.
 `result` is `PASSED` when the binding approvals reach `N`, and `pass_rule_applied` names the rule.

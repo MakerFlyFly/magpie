@@ -578,6 +578,29 @@ def test_email_only_aliases_supersede_only_their_own_row() -> None:
     assert [entry["identity"] for entry in out["superseded_votes"]] == ["address:alice@example.org"]
 
 
+def test_shared_email_does_not_merge_email_only_rows() -> None:
+    roster = tally.parse_roster(
+        """| Apache ID | Primary email |
+|---|---|
+| | x@example.org |
+| | ` X@Example.org `, y@example.org, z@example.org |
+| bob | bob@example.org |
+"""
+    )
+    votes = [vote(f"{name}@example.org", "+1") for name in ("x", "y", "z", "bob")]
+    out = tally.tally(votes, roster, {}, False, "dev-list-vote")
+
+    assert (out["binding_plus1"], out["nonbinding_plus1"], out["result"]) == (3, 0, "PASSED")
+    assert [entry["from"] for entry in out["voters"]] == [
+        "x@example.org",
+        "z@example.org",
+        "bob@example.org",
+    ]
+    assert [(entry["identity"], entry["from"]) for entry in out["superseded_votes"]] == [
+        ("address:y@example.org", "y@example.org")
+    ]
+
+
 # --- vote-tally: the Step 0 verdict, Step 1 helpers and the Step 3 render -----
 
 AIRFLOW_ROSTER = """
@@ -1048,6 +1071,24 @@ def test_pr_reviews_unmapped_login_is_non_binding():
     assert reviewers[0]["mapped"] is False
     out = tally.tally(votes, tally.parse_roster(ROSTER), {}, False, "pr-approval", 1)
     assert (out["binding_plus1"], out["nonbinding_plus1"], out["result"]) == (0, 1, "FAILED")
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("alice@example.org", (1, 0, "PASSED")),
+        ("alice@apache.org, alice@example.org", (0, 1, "FAILED")),
+    ],
+)
+def test_pr_reviews_match_one_listed_address(address: str, expected: tuple[int, int, str]) -> None:
+    roster = tally.parse_roster(
+        "| Apache ID | Primary email |\n|---|---|\n| alice | alice@apache.org, alice@example.org |\n"
+    )
+    reviews = [review("alice-gh", "APPROVED", "2026-06-11T09:00:00Z")]
+    votes, _ = tally.pr_review_votes(reviews, {"alice-gh": address})
+    out = tally.tally(votes, roster, {}, False, "pr-approval", 1)
+
+    assert (out["binding_plus1"], out["nonbinding_plus1"], out["result"]) == expected
 
 
 def test_pr_reviews_rejects_malformed_input():

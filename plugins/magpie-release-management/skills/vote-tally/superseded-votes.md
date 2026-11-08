@@ -10,5 +10,5 @@ The earlier votes are listed in `superseded_votes`; name them in the tally so th
 A vote whose date runs backwards against thread order is listed in `date_order_mismatches`: surface it to the RM.
 A clear later vote replaces an earlier ambiguous one; an ambiguous latest vote still halts the tally.
 
-A roster member's votes from their `Primary email` and from `<apache-id>@apache.org` are one voter.
+A roster member's votes from any address matched in their row's `Primary email` cell or through the `<apache-id>@apache.org` fallback count as one voter.
 An address written into the display name never binds and never supersedes another voter's vote.
