@@ -270,18 +270,11 @@ def voters(entries: list[Any], roster_text: str) -> dict[str, Any]:
         apache_id: str | None = None
         if "@" not in sender and sender.lstrip("@").lower() in ids:
             apache_id = sender.lstrip("@").lower()
-        elif tally.resolve_binding(sender, roster) is not None:
-            address = tally.normalise_address(sender)
-            apache_id = next(
-                (
-                    row["apache_id"]
-                    for row in roster
-                    if row["apache_id"]
-                    and address in (row["primary_email"], f"{row['apache_id']}@apache.org")
-                ),
-                None,
-            )
-        if apache_id is None:
+        else:
+            match = tally.match_roster(sender, roster)
+            if match is not None:
+                apache_id = match[0]["apache_id"]
+        if not apache_id:
             unresolved.append(sender)
             continue
         handle = "@" + cited.get(apache_id, apache_id)

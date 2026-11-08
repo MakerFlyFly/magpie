@@ -27,7 +27,7 @@ Moved from ``vote-tally/scripts/tally.py``, adding the ``pr-approval`` rule
 Binding resolution against the roster (a markdown table with ``Apache ID``
 and ``Primary email`` columns):
 
-1. exact, case-insensitive match of ``from`` against ``Primary email``;
+1. exact, case-insensitive match of ``from`` against each comma-separated ``Primary email`` address;
 2. when ``from`` ends in ``@apache.org``, its local part against ``Apache ID``;
 3. otherwise non-binding.
 
@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import re
 from email.utils import getaddresses
-from typing import Any
+from typing import Any, TypedDict
 
 BASELINE_MIN_BINDING_PLUS1 = 3
 BASELINE_RULE = "ASF baseline: binding_plus1 >= 3 AND binding_plus1 > binding_minus1"
@@ -83,9 +83,14 @@ def _cells(line: str) -> list[str]:
     return parts
 
 
-def parse_roster(text: str) -> list[dict[str, str]]:
-    """Return roster rows as {apache_id, primary_email} dicts (lower-cased)."""
-    rows: list[dict[str, str]] = []
+class RosterRow(TypedDict):
+    apache_id: str
+    primary_emails: tuple[str, ...]
+
+
+def parse_roster(text: str) -> list[RosterRow]:
+    """Return normalized roster rows with emails in their declared order."""
+    rows: list[RosterRow] = []
     header: list[str] | None = None
     for line in text.splitlines():
         if "|" not in line:
@@ -99,9 +104,13 @@ def parse_roster(text: str) -> list[dict[str, str]]:
             continue
         row = dict(zip(header, cells, strict=False))  # short rows leave trailing columns unset
         apache_id = row.get("apache id", "").lower()
-        email = row.get("primary email", "").lower()
-        if apache_id or email:
-            rows.append({"apache_id": apache_id, "primary_email": email})
+        emails = tuple(
+            email
+            for part in row.get("primary email", "").split(",")
+            if (email := part.strip().strip("`").strip().lower())
+        )
+        if apache_id or emails:
+            rows.append({"apache_id": apache_id, "primary_emails": emails})
     return rows
 
 
@@ -132,37 +141,35 @@ def normalise_address(sender: str) -> str:
     return address
 
 
-def resolve_binding(sender: str, roster: list[dict[str, str]]) -> str | None:
-    """Return how the voter resolved as binding, or None when non-binding."""
+def match_roster(sender: str, roster: list[RosterRow]) -> tuple[RosterRow, str] | None:
+    """Return the matched roster row and how it matched."""
     address = _parse_sender(sender)
     if address is None:
         return None
     for row in roster:
-        if row["primary_email"] and address == row["primary_email"]:
-            return "primary_email"
+        if address in row["primary_emails"]:
+            return row, "primary_email"
     if address.endswith("@apache.org"):
         local = address.rsplit("@", 1)[0]
         for row in roster:
             if row["apache_id"] and local == row["apache_id"]:
-                return "apache_id"
+                return row, "apache_id"
     return None
 
 
-def _identity(sender: str, roster: list[dict[str, str]], via: str | None) -> str:
-    """The person behind a vote: their roster Apache ID when present, else the address.
+def resolve_binding(sender: str, roster: list[RosterRow]) -> str | None:
+    """Return how the voter resolved as binding, or None when non-binding."""
+    match = match_roster(sender, roster)
+    return match[1] if match is not None else None
 
-    The two are namespaced, so a non-roster sender written as a bare ``alice`` can
-    never collide with the roster member whose Apache ID is ``alice``.
-    """
-    address = normalise_address(sender)
-    if via is not None:
-        for row in roster:
-            if row["apache_id"] and address in (
-                row["primary_email"].lower(),
-                f"{row['apache_id'].lower()}@apache.org",
-            ):
-                return "roster:" + row["apache_id"].lower()
-    return "address:" + address
+
+def _identity(sender: str, row: RosterRow | None) -> str:
+    """Group votes by roster ID, or by the row's first email for email-only members."""
+    if row is None:
+        return "address:" + normalise_address(sender)
+    if row["apache_id"]:
+        return "roster:" + row["apache_id"]
+    return "address:" + row["primary_emails"][0]
 
 
 def _superseded(old: dict[str, Any], by: dict[str, Any]) -> dict[str, Any]:
@@ -303,7 +310,7 @@ def pr_review_votes(
 
 def tally(
     votes: list[dict[str, Any]],
-    roster: list[dict[str, str]],
+    roster: list[RosterRow],
     overrides: dict[str, Any],
     force_close: bool,
     mechanism: str,
@@ -341,8 +348,10 @@ def tally(
         if not isinstance(vote, dict) or "from" not in vote or "value" not in vote:
             raise InputError(f"vote #{index} needs 'from' and 'value'")
         value = normalise_value(vote["value"])
-        via = resolve_binding(str(vote["from"]), roster)
-        identity = _identity(str(vote["from"]), roster, via)
+        sender = str(vote["from"])
+        match = match_roster(sender, roster)
+        row, via = match if match is not None else (None, None)
+        identity = _identity(sender, row)
         candidate = {
             "from": vote["from"],
             "date": vote.get("date"),

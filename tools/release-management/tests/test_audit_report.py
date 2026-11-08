@@ -203,6 +203,16 @@ def test_voters_prefer_a_github_column_and_dedupe() -> None:
     assert out["binding_voters"] == ["@AliceGH"]
 
 
+def test_voters_resolve_listed_aliases_to_one_handle_before_apache_id_fallback() -> None:
+    roster = """| Apache ID | GitHub | Primary email |
+|---|---|---|
+| alias | @OtherGH | alias@example.org |
+| alice | @AliceGH | `Alice@Example.org`, `alias@apache.org` |
+"""
+    out = render.voters(["alice@example.org", "Alice <ALIAS@apache.org>"], roster)
+    assert out == {"binding_voters": ["@AliceGH"], "unresolved": []}
+
+
 def test_voters_with_nobody_resolved_is_missing() -> None:
     assert render.voters(["x@example.org"], ROSTER)["binding_voters"] == "MISSING"
 

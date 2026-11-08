@@ -48,6 +48,14 @@ ROSTER = """
 | `dave` | Dave | dave.kim@apache.org | 2019-05-10 |
 """
 
+MULTI_ADDRESS_ROSTER = """
+| Apache ID | Primary email |
+|---|---|
+| alice | `Alice@apache.org`, , ` Alice@Example.org ` |
+| bob | bob@example.org |
+| carol | carol@example.org |
+"""
+
 EMAIL_ONLY_ROSTER = """
 | Apache ID | Name | Primary email |
 |---|---|---|
@@ -67,7 +75,7 @@ class RosterTest(unittest.TestCase):
 
     def test_parses_rows_and_strips_backticks(self) -> None:
         self.assertEqual(len(self.roster), 4)
-        self.assertEqual(self.roster[0], {"apache_id": "alice", "primary_email": "alice@apache.org"})
+        self.assertEqual(self.roster[0], {"apache_id": "alice", "primary_emails": ("alice@apache.org",)})
 
     def test_primary_email_match_is_case_insensitive(self) -> None:
         self.assertEqual(tally.resolve_binding("carol@example.com", self.roster), "primary_email")
@@ -306,6 +314,19 @@ class TallyCliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out["result"], "PASSED")
 
+    def test_cli_counts_each_listed_email_as_binding(self) -> None:
+        self.roster.write_text(MULTI_ADDRESS_ROSTER, encoding="utf-8")
+        for sender in ("alice@apache.org", "Alice <ALICE@example.org>"):
+            with self.subTest(sender=sender):
+                code, out = self.run_cli(
+                    [vote(sender, "+1"), vote("bob@example.org", "+1"), vote("carol@example.org", "+1")]
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(out["binding_plus1"], 3)
+                self.assertEqual(out["nonbinding_plus1"], 0)
+                self.assertEqual(out["voters"][0]["matched_by"], "primary_email")
+                self.assertEqual((out["result"], out["proposed_label"]), ("PASSED", "vote-passed"))
+
     def test_cli_rejects_a_non_list_votes_file(self) -> None:
         code, out = self.run_cli({"from": "alice@apache.org", "value": "+1"})
         self.assertEqual(code, 2)
@@ -510,6 +531,51 @@ def test_email_only_roster_dissent_is_not_lost_in_a_mixed_roster():
     assert len(out["voters"]) == 6
     assert out["superseded_votes"] == []
     assert (out["result"], out["proposed_label"]) == ("FAILED", "rc-rolled")
+
+
+def test_switching_between_listed_emails_supersedes_the_earlier_vote() -> None:
+    votes = [vote("alice@apache.org", "+1"), vote("Alice <ALICE@example.org>", "-1")]
+    out = tally.tally(votes, tally.parse_roster(MULTI_ADDRESS_ROSTER), {}, False, "dev-list-vote")
+
+    assert (out["binding_plus1"], out["binding_minus1"]) == (0, 1)
+    assert [entry["from"] for entry in out["voters"]] == [votes[-1]["from"]]
+    assert [entry["identity"] for entry in out["superseded_votes"]] == ["roster:alice"]
+
+
+def test_listed_email_wins_over_another_members_apache_id() -> None:
+    roster = tally.parse_roster(
+        """| Apache ID | Primary email |
+|---|---|
+| alice | alice@example.org |
+| bob | bob@example.org, alice@apache.org |
+"""
+    )
+    votes = [vote("bob@example.org", "+1"), vote("alice@apache.org", "-1")]
+    out = tally.tally(votes, roster, {}, False, "dev-list-vote")
+
+    assert (out["binding_plus1"], out["binding_minus1"]) == (0, 1)
+    assert out["voters"][0]["matched_by"] == "primary_email"
+    assert [entry["identity"] for entry in out["superseded_votes"]] == ["roster:bob"]
+
+
+def test_email_only_aliases_supersede_only_their_own_row() -> None:
+    roster = tally.parse_roster(
+        """| Apache ID | Primary email |
+|---|---|
+| | alice@example.org, alice@work.example |
+| | bob@example.org |
+"""
+    )
+    votes = [
+        vote("alice@work.example", "+1"),
+        vote("bob@example.org", "+1"),
+        vote("alice@example.org", "-1"),
+    ]
+    out = tally.tally(votes, roster, {}, False, "dev-list-vote")
+
+    assert (out["binding_plus1"], out["binding_minus1"]) == (1, 1)
+    assert [entry["from"] for entry in out["voters"]] == ["bob@example.org", "alice@example.org"]
+    assert [entry["identity"] for entry in out["superseded_votes"]] == ["address:alice@example.org"]
 
 
 # --- vote-tally: the Step 0 verdict, Step 1 helpers and the Step 3 render -----
