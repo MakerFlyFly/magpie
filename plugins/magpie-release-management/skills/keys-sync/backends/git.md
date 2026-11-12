@@ -11,6 +11,7 @@ The RM pushes to their fork instead when they lack write access to the repositor
 The GitHub web forms are `https://github.com/<owner>/<repo>/blob/<branch>/<path>` and `https://github.com/<owner>/<repo>/raw/<branch>/<path>`.
 The direct Raw form is `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>`.
 Both Raw forms accept an optional `refs/heads/` immediately before the branch.
+The Blob form keeps `refs/heads/` in the parsed path, so with `keys_file_branch` unset, `keys-sync` reads `blob/refs/heads/main/KEYS` as branch `refs` and file `heads/main/KEYS`.
 For a `blob/refs/heads/<branch>/<path>` link, use the corresponding `raw/refs/heads/<branch>/<path>` URL for `keys_file_url`.
 The first segment of the parsed path is the branch, and the rest identifies the file, for example `dist/KEYS`.
 The file must be named `KEYS`.
