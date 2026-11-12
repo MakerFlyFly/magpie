@@ -193,15 +193,15 @@ def _github(keys_url: str, keys_branch: str | None = None) -> tuple[str, str, st
         return parts[0], parts[1].removesuffix(".git"), "main", "KEYS", None
     if host == "raw.githubusercontent.com" and len(parts) >= 3:
         rest = parts[2:]
-        accepts_head_prefix = True
+        is_github_raw = True
     elif len(parts) >= 4 and parts[2] in ("blob", "raw"):
         rest = parts[3:]
-        accepts_head_prefix = github_web and parts[2] == "raw"
+        is_github_raw = github_web and parts[2] == "raw"
     else:
         raise RenderError(
             f"cannot read the repository, branch and KEYS path from keys_file_url {keys_url!r}: expected {shape}"
         )
-    if accepts_head_prefix and rest[:2] == ["refs", "heads"]:
+    if is_github_raw and rest[:2] == ["refs", "heads"]:
         rest = rest[2:]
     if not rest or rest[-1] != "KEYS":
         raise RenderError(
@@ -215,7 +215,7 @@ def _github(keys_url: str, keys_branch: str | None = None) -> tuple[str, str, st
         if rest[: len(want)] != want or len(rest) == len(want):
             mismatch = f"keys_file_branch {keys_branch!r} does not match keys_file_url {keys_url!r}"
             path_before_keys = "/".join(rest[:-1])
-            if accepts_head_prefix:
+            if is_github_raw:
                 display_path = repr(path_before_keys) if path_before_keys else "<none>"
                 raise RenderError(
                     f"{mismatch}. The parsed path before KEYS ({display_path}) "
