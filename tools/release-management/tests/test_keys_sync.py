@@ -399,6 +399,7 @@ def test_shared_signing_subkey_selects_first_group_and_refuses_step_2(
     assert (code, checked["key_found"], checked["verdict"]) == (0, True, "proceed")
     assert checked["fingerprint"] == first_fingerprint
 
+    # Step 2 reuses this listing and requires exactly one primary key before rendering commands.
     with pytest.raises(render.RenderError, match=r"lists 2 primary key\(s\)"):
         render.step2(pre, loaded(), checked, BLOCK, fetched)
 
