@@ -38,6 +38,7 @@ from release_management.cli import main
 from release_management.keys_sync import check, render
 
 FPR = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6ABCD"
+SUB_FPR = "FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000"
 TODAY = dt.date(2026, 6, 19)
 UID = "Brendan Ngan <bngan@apache.org>"
 KEYS_URL = "https://dist.apache.org/repos/dist/release/airflow/KEYS"
@@ -84,7 +85,8 @@ def key(
         "created": created,
         "expiry": expiry,
         "uids": [UID] if uids is None else uids,
-        "subkey_fingerprints": ["FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000"],
+        "subkey_fingerprints": [],
+        "subkeys": [],
     }
 
 
@@ -217,11 +219,8 @@ class TestAssess:
         out = check.assess(None, FPR, TODAY)
         assert (out["verdict"], out["key_found"]) == ("blocked", False)
 
-    def test_subkey_fingerprint_is_not_the_key_for_step_1(self) -> None:
-        assert check.find_key([key()], "FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000") is None
-
-
-SUB_FPR = "FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000"
+    def test_find_key_defaults_to_primary_fingerprints(self) -> None:
+        assert check.find_key([signing_key()], SUB_FPR) is None
 
 
 def signing_key(
@@ -234,6 +233,7 @@ def signing_key(
     """The issue #1628 shape: an Ed25519 certify-only primary plus one subkey, as list-keys prints it."""
     primary = key("22", 255, "ed25519")
     primary["caps"] = primary_caps
+    primary["subkey_fingerprints"] = [SUB_FPR]
     primary["subkeys"] = [
         {
             "fingerprint": SUB_FPR,
@@ -314,19 +314,94 @@ class TestSignerAdmission:
         assert out["verdict"] == "blocked"
         assert "below the ASF floor" in out["strength_note"] and "DSA" in out["strength_note"]
 
+    @pytest.mark.parametrize("fingerprint", [FPR, SUB_FPR])
     def test_check_cli_blocks_a_certify_only_key(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], fingerprint: str
     ) -> None:
         f = save(tmp_path, "l.json", listing(signing_key()))
-        code, out = run(capsys, "check", "--fingerprint", FPR, "--key-listing", f, "--today", "2026-06-19")
-        assert code == 0 and out["verdict"] == "blocked" and out["signers"] == []
+        code, out = run(
+            capsys, "check", "--fingerprint", fingerprint, "--key-listing", f, "--today", TODAY.isoformat()
+        )
+        assert (code, out["key_found"], out["verdict"], out["strength_check"]) == (0, True, "blocked", "fail")
+        assert out["fingerprint"] == FPR
+        assert out["signers"] == []
         f = save(tmp_path, "l.json", listing(signing_key(sub_bits=4096)))
-        code, out = run(capsys, "check", "--fingerprint", FPR, "--key-listing", f, "--today", "2026-06-19")
+        code, out = run(
+            capsys, "check", "--fingerprint", fingerprint, "--key-listing", f, "--today", TODAY.isoformat()
+        )
         assert code == 0 and out["verdict"] == "proceed"
 
     def test_step_2_refuses_a_key_blocked_for_want_of_a_signer(self) -> None:
         with pytest.raises(render.RenderError, match="Step 1 did not proceed"):
             render.step2(preflight(), loaded(), assess(signing_key()), BLOCK, listing(signing_key()))
+
+
+def test_signing_subkey_fingerprint_reaches_step_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    primary = signing_key(sub_bits=4096)
+    fetched = listing(primary)
+    pre = preflight(keys_url="https://github.com/o/r/blob/main/KEYS")
+    pre["values"]["fingerprint"] = SUB_FPR
+    unrelated = key(fpr="C" * 40)
+    assert render.verdict(pre, listing(unrelated), fetched)["verdict"] == "proceed"
+    assert render.verdict(pre, fetched, fetched)["verdict"] == "noop"
+
+    code, checked = run(
+        capsys,
+        "check",
+        "--fingerprint",
+        f"0x{SUB_FPR.lower()}",
+        "--key-listing",
+        save(tmp_path, "fetched.json", fetched),
+        "--today",
+        TODAY.isoformat(),
+    )
+    assert code == 0
+    assert (checked["key_found"], checked["verdict"], checked["strength_check"]) == (True, "proceed", "pass")
+    assert checked["fingerprint"] == FPR
+
+    config = loaded("r", "github-releases")
+    out = render.step2(pre, config, checked, BLOCK, fetched)
+    assert out["proposed"] and out["keys_block_to_append"] == f"# {UID}\n{BLOCK}"
+    commands = out["svn_command_sequence"]
+    assert f"git checkout -b keys-sync-{FPR[-16:].lower()} origin/main\n" in commands
+    assert f"(fingerprint: {FPR})" in commands
+
+    other_primary = primary | {"fingerprint": "C" * 40}
+    with pytest.raises(render.RenderError, match="expected exactly the Step 1 key"):
+        render.step2(pre, config, checked, BLOCK, listing(other_primary))
+    with pytest.raises(render.RenderError, match=r"lists 2 primary key\(s\)"):
+        render.step2(pre, config, checked, BLOCK, listing(primary, other_primary))
+
+
+def test_shared_signing_subkey_selects_first_group_and_refuses_step_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first_fingerprint = "C" * 40
+    fetched = listing(
+        signing_key(sub_bits=4096) | {"fingerprint": first_fingerprint},
+        signing_key(sub_bits=4096),
+    )
+    pre = preflight()
+    pre["values"]["fingerprint"] = SUB_FPR
+
+    code, checked = run(
+        capsys,
+        "check",
+        "--fingerprint",
+        SUB_FPR,
+        "--key-listing",
+        save(tmp_path, "fetched.json", fetched),
+        "--today",
+        TODAY.isoformat(),
+    )
+    assert (code, checked["key_found"], checked["verdict"]) == (0, True, "proceed")
+    assert checked["fingerprint"] == first_fingerprint
+
+    # Step 2 reuses this listing and requires exactly one primary key before rendering commands.
+    with pytest.raises(render.RenderError, match=r"lists 2 primary key\(s\)"):
+        render.step2(pre, loaded(), checked, BLOCK, fetched)
 
 
 class TestValidity:
@@ -397,6 +472,44 @@ class TestCheckCli:
         assert code == 2 and "error" in out
         code, out = run(capsys, "check", "--fingerprint", "E5F6ABCD", "--key-listing", f)
         assert code == 2 and "fingerprint" in out["error"]
+
+    @pytest.mark.parametrize("primary_fpr", [None, "ABC123"], ids=["missing", "invalid"])
+    def test_cli_identifies_invalid_listing_primary_fingerprint(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], primary_fpr: str | None
+    ) -> None:
+        group = signing_key(sub_bits=4096)
+        if primary_fpr is None:
+            del group["fingerprint"]
+        else:
+            group["fingerprint"] = primary_fpr
+        f = save(tmp_path, "l.json", listing(group))
+        code, out = run(capsys, "check", "--fingerprint", SUB_FPR, "--key-listing", f)
+        assert (code, set(out)) == (2, {"error"})
+        assert "--key-listing: invalid primary fingerprint" in out["error"]
+
+    @pytest.mark.parametrize(
+        ("fault", "message", "detail"),
+        [
+            ("missing-algorithm", "missing key metadata field", "'algo_id'"),
+            ("subkey-bits-type", "invalid key metadata:", "'str' and 'int'"),
+            ("invalid-expiry", "invalid key metadata:", "bad-date"),
+        ],
+    )
+    def test_cli_identifies_invalid_listing_key_metadata(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str, message: str, detail: str
+    ) -> None:
+        group = signing_key(sub_bits=4096)
+        if fault == "missing-algorithm":
+            del group["algo_id"]
+        elif fault == "subkey-bits-type":
+            group["subkeys"][0]["bits"] = "4096"
+        else:
+            group["expiry"] = "bad-date"
+        f = save(tmp_path, "l.json", listing(group))
+        code, out = run(capsys, "check", "--fingerprint", SUB_FPR, "--key-listing", f)
+        assert (code, set(out)) == (2, {"error"})
+        assert out["error"].startswith(f"--key-listing: {message}")
+        assert detail in out["error"]
 
     def test_cli_surfaces_a_release_verify_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -511,11 +624,11 @@ def test_verdict_noop_when_the_keyserver_uid_is_any_keys_uid() -> None:
 
 
 def test_verdict_matches_a_subkey_fingerprint_in_keys() -> None:
-    entry = key(fpr="C" * 40)
-    entry["subkey_fingerprints"] = [FPR]
-    served = key(fpr="C" * 40)
-    served["subkey_fingerprints"] = [FPR]
-    assert render.verdict(preflight(), listing(entry), listing(served))["verdict"] == "noop"
+    pre = preflight()
+    pre["values"]["fingerprint"] = SUB_FPR
+    entry = listing(signing_key(), file="KEYS")
+    served = listing(signing_key())
+    assert render.verdict(pre, entry, served)["verdict"] == "noop"
 
 
 def test_verdict_cannot_compare_without_a_keyserver_uid() -> None:
@@ -759,8 +872,13 @@ def test_check_cli_completed_assessments_keep_the_field_contract(
 ) -> None:
     """A listing holding another key's fingerprint is `key_found: false`, exit 0, same fields."""
     f = save(tmp_path, "l.json", listing(key(fpr=listed)))
-    code, out = run(capsys, "check", "--fingerprint", FPR, "--key-listing", f, "--today", "2026-06-19")
+    code, out = run(
+        capsys, "check", "--fingerprint", f"0x{FPR.lower()}", "--key-listing", f, "--today", TODAY.isoformat()
+    )
     assert (code, out["key_found"], set(out)) == (0, found, STEP_1_FIELDS)
+    assert out["fingerprint"] == FPR
+    assert out["verdict"] == ("proceed" if found else "blocked")
+    assert out["strength_check"] == ("pass" if found else None)
 
 
 def test_check_cli_needs_a_fingerprint(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
