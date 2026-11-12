@@ -217,8 +217,8 @@ class TestAssess:
         out = check.assess(None, FPR, TODAY)
         assert (out["verdict"], out["key_found"]) == ("blocked", False)
 
-    def test_subkey_fingerprint_is_not_the_key_for_step_1(self) -> None:
-        assert check.find_key([key()], "FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000") is None
+    def test_find_key_defaults_to_primary_fingerprints(self) -> None:
+        assert check.find_key([key()], SUB_FPR) is None
 
 
 SUB_FPR = "FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000"
@@ -314,19 +314,60 @@ class TestSignerAdmission:
         assert out["verdict"] == "blocked"
         assert "below the ASF floor" in out["strength_note"] and "DSA" in out["strength_note"]
 
+    @pytest.mark.parametrize("fingerprint", [FPR, SUB_FPR])
     def test_check_cli_blocks_a_certify_only_key(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], fingerprint: str
     ) -> None:
         f = save(tmp_path, "l.json", listing(signing_key()))
-        code, out = run(capsys, "check", "--fingerprint", FPR, "--key-listing", f, "--today", "2026-06-19")
-        assert code == 0 and out["verdict"] == "blocked" and out["signers"] == []
+        code, out = run(
+            capsys, "check", "--fingerprint", fingerprint, "--key-listing", f, "--today", TODAY.isoformat()
+        )
+        assert (code, out["key_found"], out["verdict"], out["strength_check"]) == (0, True, "blocked", "fail")
+        assert out["signers"] == []
         f = save(tmp_path, "l.json", listing(signing_key(sub_bits=4096)))
-        code, out = run(capsys, "check", "--fingerprint", FPR, "--key-listing", f, "--today", "2026-06-19")
+        code, out = run(
+            capsys, "check", "--fingerprint", fingerprint, "--key-listing", f, "--today", TODAY.isoformat()
+        )
         assert code == 0 and out["verdict"] == "proceed"
 
     def test_step_2_refuses_a_key_blocked_for_want_of_a_signer(self) -> None:
         with pytest.raises(render.RenderError, match="Step 1 did not proceed"):
             render.step2(preflight(), loaded(), assess(signing_key()), BLOCK, listing(signing_key()))
+
+
+def test_signing_subkey_fingerprint_reaches_step_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    primary = signing_key(sub_bits=4096)
+    fetched = listing(primary)
+    pre = preflight()
+    pre["values"]["fingerprint"] = SUB_FPR
+    unrelated = key(fpr="C" * 40) | {"subkey_fingerprints": []}
+    assert render.verdict(pre, listing(unrelated), fetched)["verdict"] == "proceed"
+    assert render.verdict(pre, fetched, fetched)["verdict"] == "noop"
+
+    code, checked = run(
+        capsys,
+        "check",
+        "--fingerprint",
+        f"0x{SUB_FPR.lower()}",
+        "--key-listing",
+        save(tmp_path, "fetched.json", fetched),
+        "--today",
+        TODAY.isoformat(),
+    )
+    assert code == 0
+    assert (checked["key_found"], checked["verdict"], checked["strength_check"]) == (True, "proceed", "pass")
+    assert checked["fingerprint"] == FPR
+
+    out = render.step2(pre, loaded(), checked, BLOCK, fetched)
+    assert out["proposed"] and out["keys_block_to_append"] == f"# {UID}\n{BLOCK}"
+
+    other_primary = primary | {"fingerprint": "C" * 40}
+    with pytest.raises(render.RenderError, match="expected exactly the Step 1 key"):
+        render.step2(pre, loaded(), checked, BLOCK, listing(other_primary))
+    with pytest.raises(render.RenderError, match=r"lists 2 primary key\(s\)"):
+        render.step2(pre, loaded(), checked, BLOCK, listing(primary, other_primary))
 
 
 class TestValidity:

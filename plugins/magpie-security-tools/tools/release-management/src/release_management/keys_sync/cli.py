@@ -100,7 +100,10 @@ def dispatch(args: argparse.Namespace) -> int:
             fpr = check.normalise_fpr(args.fingerprint)
             today = dt.date.fromisoformat(args.today) if args.today else dt.datetime.now(dt.UTC).date()
             keys = check.listed_keys(_json(args.key_listing), "--key-listing")
-            out = check.assess(check.find_key(keys, fpr), fpr, today)
+            key = check.find_key(keys, fpr, subkeys=True)
+            # Step 2 binds the fetched key file to the primary assessed here.
+            primary_fpr = fpr if key is None else check.normalise_fpr(str(key.get("fingerprint") or ""))
+            out = check.assess(key, primary_fpr, today)
         elif args.command == "keys-dir":
             out = check.keys_dir(args.keys_url)
         else:
