@@ -803,6 +803,10 @@ def git_step2(url: str, keys_branch: str | None = None, *, in_config: bool = Fal
         ("https://github.com/o/r/blob/main/KEYS", "main", "KEYS", False),
         ("https://github.com/o/r/blob/main/dist/KEYS", "main", "dist/KEYS", True),
         ("https://github.com/o/r.git/raw/main/release/keys/KEYS", "main", "release/keys/KEYS", True),
+        ("https://github.com/o/r/raw/refs/heads/main/KEYS", "main", "KEYS", False),
+        ("https://GITHUB.COM/o/r/raw/refs/heads/main/KEYS?raw=1#L2", "main", "KEYS", False),
+        ("https://github.com/o/r/raw/refs/heads/refs/KEYS", "refs", "KEYS", False),
+        ("https://www.github.com/o/r/raw/refs/heads/main/dist/KEYS", "main", "dist/KEYS", True),
         ("https://raw.githubusercontent.com/o/r/main/KEYS", "main", "KEYS", False),
         ("https://raw.githubusercontent.com/o/r/main/dist/KEYS", "main", "dist/KEYS", True),
         ("https://raw.githubusercontent.com/o/r/refs/heads/main/dist/KEYS", "main", "dist/KEYS", True),
@@ -825,8 +829,16 @@ def test_step_2_git_branch_is_the_first_segment_and_keys_may_sit_in_a_subdir(
 
 
 @pytest.mark.parametrize("in_config", [False, True])
-def test_step_2_keys_file_branch_names_a_branch_holding_a_slash(in_config: bool) -> None:
-    out = git_step2("https://github.com/o/r/blob/release/1.x/dist/KEYS", "release/1.x", in_config=in_config)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/o/r/blob/release/1.x/dist/KEYS",
+        "https://github.com/o/r/raw/refs/heads/release/1.x/dist/KEYS",
+        "https://raw.githubusercontent.com/o/r/refs/heads/release/1.x/dist/KEYS",
+    ],
+)
+def test_step_2_keys_file_branch_names_a_branch_holding_a_slash(url: str, in_config: bool) -> None:
+    out = git_step2(url, "release/1.x", in_config=in_config)
     commands = out["svn_command_sequence"]
     assert "origin/release/1.x\n" in commands and "--base release/1.x " in commands
     assert "git add dist/KEYS\n" in commands
@@ -840,13 +852,34 @@ def test_step_2_keys_file_branch_quotes_a_hostile_branch() -> None:
 
 @pytest.mark.parametrize(
     "url",
-    ["https://github.com/o/r/blob/release/2.x/dist/KEYS", "https://github.com/o/r/blob/release/1.x/KEYS2"],
+    [
+        "https://github.com/o/r/blob/release/2.x/dist/KEYS",
+        "https://github.com/o/r/blob/release/1.x/KEYS2",
+    ],
 )
 def test_step_2_keys_file_branch_mismatch_is_refused(url: str) -> None:
     with pytest.raises(render.RenderError) as exc:
         git_step2(url, "release/1.x/KEYS2" if url.endswith("KEYS2") else "release/1.x")
     message = str(exc.value)
     assert ("does not match" in message or "called KEYS" in message) and url in message
+
+
+@pytest.mark.parametrize("raw_repo", ["https://github.com/o/r/raw", "https://raw.githubusercontent.com/o/r"])
+@pytest.mark.parametrize(
+    ("suffix", "parsed_path"),
+    [("release/2.x/dist/KEYS", "'release/2.x/dist'"), ("KEYS", "<none>")],
+)
+def test_step_2_raw_branch_mismatch_reports_parsed_path(raw_repo: str, suffix: str, parsed_path: str) -> None:
+    url = f"{raw_repo}/refs/heads/{suffix}"
+    keys_branch = "release/1.x"
+    with pytest.raises(render.RenderError) as exc:
+        git_step2(url, keys_branch)
+    message = str(exc.value)
+    assert f"keys_file_branch {keys_branch!r}" in message
+    assert f"keys_file_url {url!r}" in message
+    assert parsed_path in message
+    assert "Set keys_file_branch" in message
+    assert "supply a KEYS URL" in message
 
 
 def test_step_2_keys_file_branch_naming_the_whole_path_is_refused() -> None:
@@ -859,6 +892,7 @@ def test_step_2_keys_file_branch_naming_the_whole_path_is_refused() -> None:
     [
         "https://github.com/o/r/blob/main/KEYS.txt",
         "https://github.com/o/r/blob/main/docs/keys",
+        "https://github.com/o/r/raw/refs/heads/main/KEYS.txt",
         "https://raw.githubusercontent.com/o/r/main/dist/KEYS.asc",
     ],
 )
@@ -868,7 +902,12 @@ def test_step_2_git_refuses_a_file_not_named_keys(url: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "url", ["https://github.com/o/r/tree/main", "https://raw.githubusercontent.com/o/r/KEYS"]
+    "url",
+    [
+        "https://github.com/o/r/tree/main",
+        "https://github.com/o/r/raw/refs/heads/KEYS",
+        "https://raw.githubusercontent.com/o/r/KEYS",
+    ],
 )
 def test_step_2_git_refuses_a_url_without_branch_and_keys(url: str) -> None:
     with pytest.raises(

@@ -176,33 +176,33 @@ def public_block(text: str) -> str:
 
 
 def _github(keys_url: str, keys_branch: str | None = None) -> tuple[str, str, str, str, str | None]:
-    """`https://github.com/<owner>/<repo>/blob/<branch>/<path>/KEYS` → (owner, repo, branch, path, warning).
+    """Return the owner, repo, branch, KEYS path and any warning from a GitHub URL.
 
-    `blob/`, `raw/` and `raw.githubusercontent.com/<owner>/<repo>/[refs/heads/]…`
-    are read alike. The branch is the first segment after them and the path the
-    rest, so KEYS may sit in a sub-directory (`dist/KEYS`). A branch holding `/`
-    (`release/1.x`) cannot be told from the URL: `keys_file_branch` names it, and
-    the URL must then start with it. Without `keys_file_branch` and with a path in
-    a sub-directory, the reading is stated as a warning. The file must be named
-    `KEYS`; anything else is refused.
+    Both Raw URL forms allow an optional `refs/heads/` before the branch. The
+    first remaining segment names the branch and the rest names the file, which
+    must be called `KEYS`. `keys_file_branch` names a branch containing `/`, such
+    as `release/1.x`, and must match the start of the parsed path. Without it,
+    a file in a subdirectory such as `dist/KEYS` comes with a warning.
     """
     parsed = urlparse(keys_url)
     parts = [p for p in parsed.path.split("/") if p]
     host = (parsed.hostname or "").lower()
+    github_web = host in ("github.com", "www.github.com")
     shape = "https://github.com/<owner>/<repo>/blob/<branch>/[<dir>/]KEYS"
-    if host in ("github.com", "www.github.com") and len(parts) == 2 and not keys_branch:
+    if github_web and len(parts) == 2 and not keys_branch:
         return parts[0], parts[1].removesuffix(".git"), "main", "KEYS", None
-    rest: list[str] | None = None
     if host == "raw.githubusercontent.com" and len(parts) >= 3:
         rest = parts[2:]
-        if rest[:2] == ["refs", "heads"]:
-            rest = rest[2:]
+        is_github_raw = True
     elif len(parts) >= 4 and parts[2] in ("blob", "raw"):
         rest = parts[3:]
-    if rest is None:
+        is_github_raw = github_web and parts[2] == "raw"
+    else:
         raise RenderError(
             f"cannot read the repository, branch and KEYS path from keys_file_url {keys_url!r}: expected {shape}"
         )
+    if is_github_raw and rest[:2] == ["refs", "heads"]:
+        rest = rest[2:]
     if not rest or rest[-1] != "KEYS":
         raise RenderError(
             f"keys_file_url {keys_url!r} does not name a file called KEYS (last segment "
@@ -213,10 +213,18 @@ def _github(keys_url: str, keys_branch: str | None = None) -> tuple[str, str, st
     if keys_branch:
         want = [b for b in keys_branch.strip().split("/") if b]
         if rest[: len(want)] != want or len(rest) == len(want):
+            mismatch = f"keys_file_branch {keys_branch!r} does not match keys_file_url {keys_url!r}"
+            path_before_keys = "/".join(rest[:-1])
+            if is_github_raw:
+                display_path = repr(path_before_keys) if path_before_keys else "<none>"
+                raise RenderError(
+                    f"{mismatch}. The parsed path before KEYS ({display_path}) "
+                    "must start with the configured branch. "
+                    "Set keys_file_branch to the branch in the URL or supply a KEYS URL for the configured branch."
+                )
             raise RenderError(
-                f"keys_file_branch {keys_branch!r} does not match keys_file_url {keys_url!r}: the URL's segments "
-                f"after blob/ ({'/'.join(rest[:-1]) or '<none>'} before KEYS) must start with the branch; "
-                "fix one of them"
+                f"{mismatch}: the URL's segments after blob/ ({path_before_keys or '<none>'} before KEYS) "
+                "must start with the branch; fix one of them"
             )
         branch, path = "/".join(want), "/".join(rest[len(want) :])
     else:
