@@ -804,6 +804,8 @@ def git_step2(url: str, keys_branch: str | None = None, *, in_config: bool = Fal
         ("https://github.com/o/r/blob/main/dist/KEYS", "main", "dist/KEYS", True),
         ("https://github.com/o/r.git/raw/main/release/keys/KEYS", "main", "release/keys/KEYS", True),
         ("https://github.com/o/r/raw/refs/heads/main/KEYS", "main", "KEYS", False),
+        ("https://GITHUB.COM/o/r/raw/refs/heads/main/KEYS?raw=1#L2", "main", "KEYS", False),
+        ("https://github.com/o/r/raw/refs/heads/refs/KEYS", "refs", "KEYS", False),
         ("https://www.github.com/o/r/raw/refs/heads/main/dist/KEYS", "main", "dist/KEYS", True),
         ("https://raw.githubusercontent.com/o/r/main/KEYS", "main", "KEYS", False),
         ("https://raw.githubusercontent.com/o/r/main/dist/KEYS", "main", "dist/KEYS", True),
@@ -832,6 +834,7 @@ def test_step_2_git_branch_is_the_first_segment_and_keys_may_sit_in_a_subdir(
     [
         "https://github.com/o/r/blob/release/1.x/dist/KEYS",
         "https://github.com/o/r/raw/refs/heads/release/1.x/dist/KEYS",
+        "https://raw.githubusercontent.com/o/r/refs/heads/release/1.x/dist/KEYS",
     ],
 )
 def test_step_2_keys_file_branch_names_a_branch_holding_a_slash(url: str, in_config: bool) -> None:
@@ -852,7 +855,6 @@ def test_step_2_keys_file_branch_quotes_a_hostile_branch() -> None:
     [
         "https://github.com/o/r/blob/release/2.x/dist/KEYS",
         "https://github.com/o/r/blob/release/1.x/KEYS2",
-        "https://github.com/o/r/raw/refs/heads/release/2.x/dist/KEYS",
     ],
 )
 def test_step_2_keys_file_branch_mismatch_is_refused(url: str) -> None:
@@ -860,6 +862,16 @@ def test_step_2_keys_file_branch_mismatch_is_refused(url: str) -> None:
         git_step2(url, "release/1.x/KEYS2" if url.endswith("KEYS2") else "release/1.x")
     message = str(exc.value)
     assert ("does not match" in message or "called KEYS" in message) and url in message
+
+
+def test_step_2_raw_branch_mismatch_reports_parsed_path() -> None:
+    url = "https://github.com/o/r/raw/refs/heads/release/2.x/dist/KEYS"
+    with pytest.raises(render.RenderError) as exc:
+        git_step2(url, "release/1.x")
+    assert str(exc.value) == (
+        f"keys_file_branch 'release/1.x' does not match keys_file_url {url!r}. "
+        "The parsed path before KEYS ('release/2.x/dist') must start with the configured branch."
+    )
 
 
 def test_step_2_keys_file_branch_naming_the_whole_path_is_refused() -> None:
