@@ -102,7 +102,12 @@ def dispatch(args: argparse.Namespace) -> int:
             keys = check.listed_keys(_json(args.key_listing), "--key-listing")
             key = check.find_key(keys, fpr, subkeys=True)
             # Step 2 binds the fetched key file to the primary assessed here.
-            primary_fpr = fpr if key is None else check.normalise_fpr(str(key.get("fingerprint") or ""))
+            primary_fpr = fpr
+            if key is not None:
+                try:
+                    primary_fpr = check.normalise_fpr(str(key.get("fingerprint") or ""))
+                except check.InputError as exc:
+                    raise check.InputError(f"--key-listing: invalid primary fingerprint: {exc}") from exc
             out = check.assess(key, primary_fpr, today)
         elif args.command == "keys-dir":
             out = check.keys_dir(args.keys_url)

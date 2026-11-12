@@ -20,7 +20,7 @@ argument-hint: "[--fingerprint <fp>] [--keys-url <url>] [--keyserver <host>]"
 capability: capability:resolve
 surface_hash: sha256:61e10c986bb0d3ec
 license: Apache-2.0
-measured_tokens: 5014
+measured_tokens: 5152
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -31,7 +31,7 @@ measured_tokens: 5014
      <upstream>             → adopter's public source repo (e.g. apache/airflow)
      <project-dist-name>    → project's dist name (e.g. airflow)
      <rm-uid>               → Release Manager's UID string (e.g. "A. Smith <asmith@apache.org>")
-     <fingerprint>          → the RM's GPG key fingerprint (40 hex chars, no spaces)
+     <fingerprint>          → the RM's requested GPG fingerprint (primary or subkey)
      <keys-file-url>        → configured keys_file_url value
      <keyserver>            → configured keyserver value (e.g. keys.openpgp.org)
      <svn-keys-dir-url>     → parent SVN directory URL containing the KEYS file
@@ -226,12 +226,13 @@ Return ONLY valid JSON with this structure (the verdict's fields, without `pendi
   "verdict": "proceed" | "blocked" | "noop",
   "blockers": ["<string>"],
   "noop_reason": "<string or null>",
-  "fingerprint": "<40-hex-char fingerprint>",
+  "fingerprint": "<normalized requested fingerprint>" | null,
   "keys_file_url": "<url>",
   "keyserver": "<keyserver host>"
 }
 ```
 
+`fingerprint` is the normalized request (40 or 64 hex characters), or `null` when unresolved.
 `verdict` is `"noop"` when the fingerprint is already present in KEYS for the same UID; the RM can proceed directly to `release-rc-cut`.
 `noop_reason` is non-null only when `verdict` is `"noop"`.
 `blockers` is non-empty only when `verdict` is `"blocked"`.
@@ -247,12 +248,16 @@ Fetch the RM's **public** key block for `<fingerprint>` from the keyserver into 
 <RM> check --key-listing <scratch>/key-list.json --fingerprint <fingerprint> > <scratch>/keys-check.json
 ```
 
+`check` locates the key group by the requested primary or subkey fingerprint and assesses that group.
 It applies the floor from [ASF release-signing](https://infra.apache.org/release-signing.html):
 RSA and DSA at least 2048 bits, EdDSA (Ed25519) and ECDSA (P-256 or stronger) accepted, anything else (secp256k1 included) refused.
 The key also needs a usable signing-capable key: a certify-only primary needs a signing subkey that meets the same rules, and `signers` lists the compliant ones.
 A missing, sub-floor, already-expired, revoked, invalid or disabled key, or one with no compliant signer, is `blocked`: read [`outcomes/blocked-key.md`](outcomes/blocked-key.md).
 `strength_note` carries the failure reason, the DSA advisory, and a non-blocking advisory for an expiry within 90 days.
-On an `error` (no gpg, a gpg failure or malformed key block reported by `list-keys`, bad fingerprint), surface it; it is never a missing key, and never judge the key by hand.
+When `key_found` is `true`, `fingerprint` is the normalized fingerprint of the assessed primary, including when its group is blocked.
+When `key_found` is `false`, `fingerprint` is the normalized request.
+Surface any `error`, including a failure from `list-keys`, an invalid request fingerprint, or an invalid primary fingerprint in `--key-listing`.
+The tool reports a missing key as `key_found: false` and supplies the assessment for signing decisions.
 Return the JSON unchanged.
 
 Return ONLY valid JSON with this structure:
@@ -261,7 +266,7 @@ Return ONLY valid JSON with this structure:
 {
   "verdict": "proceed" | "blocked",
   "key_found": true | false,
-  "fingerprint": "<fingerprint>",
+  "fingerprint": "<normalized fingerprint>",
   "uid": "<primary UID string or null>",
   "algorithm": "RSA" | "EdDSA" | "ECDSA" | "DSA" | null,
   "bit_length": <integer or null>,
@@ -277,6 +282,7 @@ Return ONLY valid JSON with this structure:
 
 ## Step 2 — Draft KEYS block and command sequence
 
+Reuse the public key file and listing from Step 1.
 Save the configuration with `release-config load --skill keys-sync > <scratch>/keys-load.json`, then render:
 
 ```bash
@@ -298,6 +304,8 @@ It refuses unless Step 1 proceeded, and prints:
 3. **`keyserver_upload_reminder`** — upload to `https://<keyserver>/upload` (or the keyserver's documented upload endpoint) so that voters and future verifiers can fetch it,
    restating the Step 1 expiry advisory when there is one.
 
+The commit message uses Step 1's assessed primary fingerprint.
+The Git working branch uses the last 16 hex characters of that fingerprint in lowercase.
 Every UID, fingerprint and URL in the commands is quoted: the UID comes from the keyserver.
 Present the KEYS block, command sequence, and reminder to the RM.
 Ask for confirmation before the RM runs the commands.
@@ -321,7 +329,7 @@ Return ONLY valid JSON with this structure:
 
 The AI-driven part ends with a hand-back artefact containing:
 
-- **RM identification** — `<rm-uid>` and `<fingerprint>`.
+- **RM identification** — the UID and assessed primary fingerprint from Step 1.
 - **Strength confirmation** — algorithm and bit-length (or curve) from Step 1.
 - **Expiry advisory** — if the key expires within 90 days, restate the advisory and the expiry date.
 - **KEYS block** — the block appended (or to be appended).

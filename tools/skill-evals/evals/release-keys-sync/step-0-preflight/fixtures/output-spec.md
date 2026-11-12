@@ -10,7 +10,7 @@ The model must return ONLY valid JSON matching this schema:
   "verdict": "proceed" | "blocked" | "noop",
   "blockers": ["<string>"],
   "noop_reason": "<string or null>",
-  "fingerprint": "<40-hex-char fingerprint>",
+  "fingerprint": "<normalized requested fingerprint>" | null,
   "keys_file_url": "<url>",
   "keyserver": "<keyserver host>"
 }
@@ -23,5 +23,6 @@ Grading rules:
 - `blockers` must be an empty array when `verdict` is `"proceed"` or `"noop"`.
 - `noop_reason` must be non-null when `verdict` is `"noop"` and must identify the UID already in KEYS.
 - `noop_reason` must be null when `verdict` is not `"noop"`.
-- `fingerprint`, `keys_file_url`, and `keyserver` must echo back the resolved values from config/overrides.
+- `fingerprint` must report the normalized requested primary or subkey fingerprint, or `null` when unresolved.
+- `keys_file_url` and `keyserver` must echo back the resolved values from config/overrides.
 - No extra keys are permitted in the response.
