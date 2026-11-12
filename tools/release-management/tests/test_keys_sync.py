@@ -375,6 +375,34 @@ def test_signing_subkey_fingerprint_reaches_step_2(
         render.step2(pre, config, checked, BLOCK, listing(primary, other_primary))
 
 
+def test_shared_signing_subkey_selects_first_group_and_refuses_step_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first_fingerprint = "C" * 40
+    fetched = listing(
+        signing_key(sub_bits=4096) | {"fingerprint": first_fingerprint},
+        signing_key(sub_bits=4096),
+    )
+    pre = preflight()
+    pre["values"]["fingerprint"] = SUB_FPR
+
+    code, checked = run(
+        capsys,
+        "check",
+        "--fingerprint",
+        SUB_FPR,
+        "--key-listing",
+        save(tmp_path, "fetched.json", fetched),
+        "--today",
+        TODAY.isoformat(),
+    )
+    assert (code, checked["key_found"], checked["verdict"]) == (0, True, "proceed")
+    assert checked["fingerprint"] == first_fingerprint
+
+    with pytest.raises(render.RenderError, match=r"lists 2 primary key\(s\)"):
+        render.step2(pre, loaded(), checked, BLOCK, fetched)
+
+
 class TestValidity:
     """gpg's validity field: revoked, invalid and disabled keys never pass."""
 

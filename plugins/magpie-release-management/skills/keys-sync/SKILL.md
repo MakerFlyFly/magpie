@@ -20,7 +20,7 @@ argument-hint: "[--fingerprint <fp>] [--keys-url <url>] [--keyserver <host>]"
 capability: capability:resolve
 surface_hash: sha256:61e10c986bb0d3ec
 license: Apache-2.0
-measured_tokens: 5148
+measured_tokens: 5178
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -248,15 +248,17 @@ Fetch the RM's **public** key block for `<fingerprint>` from the keyserver into 
 <RM> check --key-listing <scratch>/key-list.json --fingerprint <fingerprint> > <scratch>/keys-check.json
 ```
 
-`check` locates the key group by the requested primary or subkey fingerprint and assesses that group.
+`check` uses the requested primary or subkey fingerprint to locate the group and assesses its primary and signers.
 It applies the floor from [ASF release-signing](https://infra.apache.org/release-signing.html):
 RSA and DSA at least 2048 bits, EdDSA (Ed25519) and ECDSA (P-256 or stronger) accepted, anything else (secp256k1 included) refused.
-The key also needs a usable signing-capable key: a certify-only primary needs a signing subkey that meets the same rules, and `signers` lists the compliant ones.
-A missing, sub-floor, already-expired, revoked, invalid or disabled key, or one with no compliant signer, is `blocked`: read [`outcomes/blocked-key.md`](outcomes/blocked-key.md).
+The group also needs a usable signing-capable key. A certify-only primary needs a signing subkey that meets the same rules.
+When the request names a subkey, another usable, compliant signer in the group can meet that requirement.
+`signers` lists the compliant signers in the group.
+A missing, sub-floor, already-expired, revoked, invalid or disabled key, or one with no compliant signer, is `blocked`.
 `strength_note` carries the failure reason, the DSA advisory, and a non-blocking advisory for an expiry within 90 days.
 When `key_found` is `true`, `fingerprint` is the normalized fingerprint of the assessed primary, including when its group is blocked.
 When `key_found` is `false`, `fingerprint` is the normalized request and `verdict` is `"blocked"`.
-Stop at Step 1 for this verdict.
+For any `blocked` verdict, stop at Step 1 and read [`outcomes/blocked-key.md`](outcomes/blocked-key.md).
 Surface any `error`, including a failure from `list-keys`, an invalid request fingerprint, or malformed key metadata in `--key-listing`.
 Return the JSON unchanged.
 
