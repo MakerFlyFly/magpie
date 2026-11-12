@@ -108,7 +108,12 @@ def dispatch(args: argparse.Namespace) -> int:
                     primary_fpr = check.normalise_fpr(str(key.get("fingerprint") or ""))
                 except check.InputError as exc:
                     raise check.InputError(f"--key-listing: invalid primary fingerprint: {exc}") from exc
-            out = check.assess(key, primary_fpr, today)
+            try:
+                out = check.assess(key, primary_fpr, today)
+            except KeyError as exc:
+                raise check.InputError(f"--key-listing: missing key metadata field {exc}") from exc
+            except (TypeError, ValueError) as exc:
+                raise check.InputError(f"--key-listing: invalid key metadata: {exc}") from exc
         elif args.command == "keys-dir":
             out = check.keys_dir(args.keys_url)
         else:

@@ -20,7 +20,7 @@ argument-hint: "[--fingerprint <fp>] [--keys-url <url>] [--keyserver <host>]"
 capability: capability:resolve
 surface_hash: sha256:61e10c986bb0d3ec
 license: Apache-2.0
-measured_tokens: 5152
+measured_tokens: 5148
 ---
 
 <!-- SPDX-License-Identifier: Apache-2.0
@@ -255,9 +255,9 @@ The key also needs a usable signing-capable key: a certify-only primary needs a 
 A missing, sub-floor, already-expired, revoked, invalid or disabled key, or one with no compliant signer, is `blocked`: read [`outcomes/blocked-key.md`](outcomes/blocked-key.md).
 `strength_note` carries the failure reason, the DSA advisory, and a non-blocking advisory for an expiry within 90 days.
 When `key_found` is `true`, `fingerprint` is the normalized fingerprint of the assessed primary, including when its group is blocked.
-When `key_found` is `false`, `fingerprint` is the normalized request.
-Surface any `error`, including a failure from `list-keys`, an invalid request fingerprint, or an invalid primary fingerprint in `--key-listing`.
-The tool reports a missing key as `key_found: false` and supplies the assessment for signing decisions.
+When `key_found` is `false`, `fingerprint` is the normalized request and `verdict` is `"blocked"`.
+Stop at Step 1 for this verdict.
+Surface any `error`, including a failure from `list-keys`, an invalid request fingerprint, or malformed key metadata in `--key-listing`.
 Return the JSON unchanged.
 
 Return ONLY valid JSON with this structure:

@@ -458,6 +458,30 @@ class TestCheckCli:
         assert (code, set(out)) == (2, {"error"})
         assert "--key-listing: invalid primary fingerprint" in out["error"]
 
+    @pytest.mark.parametrize(
+        ("fault", "message", "detail"),
+        [
+            ("missing-algorithm", "missing key metadata field", "'algo_id'"),
+            ("subkey-bits-type", "invalid key metadata:", "'str' and 'int'"),
+            ("invalid-expiry", "invalid key metadata:", "bad-date"),
+        ],
+    )
+    def test_cli_identifies_invalid_listing_key_metadata(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str, message: str, detail: str
+    ) -> None:
+        group = signing_key(sub_bits=4096)
+        if fault == "missing-algorithm":
+            del group["algo_id"]
+        elif fault == "subkey-bits-type":
+            group["subkeys"][0]["bits"] = "4096"
+        else:
+            group["expiry"] = "bad-date"
+        f = save(tmp_path, "l.json", listing(group))
+        code, out = run(capsys, "check", "--fingerprint", SUB_FPR, "--key-listing", f)
+        assert (code, set(out)) == (2, {"error"})
+        assert out["error"].startswith(f"--key-listing: {message}")
+        assert detail in out["error"]
+
     def test_cli_surfaces_a_release_verify_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -824,6 +848,8 @@ def test_check_cli_completed_assessments_keep_the_field_contract(
     )
     assert (code, out["key_found"], set(out)) == (0, found, STEP_1_FIELDS)
     assert out["fingerprint"] == FPR
+    assert out["verdict"] == ("proceed" if found else "blocked")
+    assert out["strength_check"] == ("pass" if found else None)
 
 
 def test_check_cli_needs_a_fingerprint(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
