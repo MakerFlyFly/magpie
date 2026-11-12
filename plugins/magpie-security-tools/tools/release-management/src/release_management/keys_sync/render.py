@@ -178,9 +178,10 @@ def public_block(text: str) -> str:
 def _github(keys_url: str, keys_branch: str | None = None) -> tuple[str, str, str, str, str | None]:
     """`https://github.com/<owner>/<repo>/blob/<branch>/<path>/KEYS` → (owner, repo, branch, path, warning).
 
-    `blob/`, `raw/` and `raw.githubusercontent.com/<owner>/<repo>/[refs/heads/]…`
-    are read alike. The branch is the first segment after them and the path the
-    rest, so KEYS may sit in a sub-directory (`dist/KEYS`). A branch holding `/`
+    `blob/`, `raw/` and `raw.githubusercontent.com/<owner>/<repo>/…`
+    are read alike. Both raw forms allow `refs/heads/` before the branch. The
+    branch is the first segment after that prefix and the path is the rest, so
+    KEYS may sit in a sub-directory (`dist/KEYS`). A branch holding `/`
     (`release/1.x`) cannot be told from the URL: `keys_file_branch` names it, and
     the URL must then start with it. Without `keys_file_branch` and with a path in
     a sub-directory, the reading is stated as a warning. The file must be named
@@ -189,20 +190,22 @@ def _github(keys_url: str, keys_branch: str | None = None) -> tuple[str, str, st
     parsed = urlparse(keys_url)
     parts = [p for p in parsed.path.split("/") if p]
     host = (parsed.hostname or "").lower()
+    github_web = host in ("github.com", "www.github.com")
     shape = "https://github.com/<owner>/<repo>/blob/<branch>/[<dir>/]KEYS"
-    if host in ("github.com", "www.github.com") and len(parts) == 2 and not keys_branch:
+    if github_web and len(parts) == 2 and not keys_branch:
         return parts[0], parts[1].removesuffix(".git"), "main", "KEYS", None
     rest: list[str] | None = None
     if host == "raw.githubusercontent.com" and len(parts) >= 3:
         rest = parts[2:]
-        if rest[:2] == ["refs", "heads"]:
-            rest = rest[2:]
     elif len(parts) >= 4 and parts[2] in ("blob", "raw"):
         rest = parts[3:]
     if rest is None:
         raise RenderError(
             f"cannot read the repository, branch and KEYS path from keys_file_url {keys_url!r}: expected {shape}"
         )
+    is_raw = host == "raw.githubusercontent.com" or (github_web and parts[2] == "raw")
+    if is_raw and rest[:2] == ["refs", "heads"]:
+        rest = rest[2:]
     if not rest or rest[-1] != "KEYS":
         raise RenderError(
             f"keys_file_url {keys_url!r} does not name a file called KEYS (last segment "
