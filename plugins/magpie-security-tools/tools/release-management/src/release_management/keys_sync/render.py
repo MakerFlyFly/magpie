@@ -213,10 +213,18 @@ def _github(keys_url: str, keys_branch: str | None = None) -> tuple[str, str, st
     if keys_branch:
         want = [b for b in keys_branch.strip().split("/") if b]
         if rest[: len(want)] != want or len(rest) == len(want):
+            mismatch = f"keys_file_branch {keys_branch!r} does not match keys_file_url {keys_url!r}"
+            path_before_keys = "/".join(rest[:-1])
+            if accepts_head_prefix:
+                display_path = repr(path_before_keys) if path_before_keys else "<none>"
+                raise RenderError(
+                    f"{mismatch}. The parsed path before KEYS ({display_path}) "
+                    "must start with the configured branch. "
+                    "Set keys_file_branch to the branch in the URL or supply a KEYS URL for the configured branch."
+                )
             raise RenderError(
-                f"keys_file_branch {keys_branch!r} does not match keys_file_url {keys_url!r}. "
-                f"The parsed path before KEYS ({'/'.join(rest[:-1])!r}) "
-                "must start with the configured branch."
+                f"{mismatch}: the URL's segments after blob/ ({path_before_keys or '<none>'} before KEYS) "
+                "must start with the branch; fix one of them"
             )
         branch, path = "/".join(want), "/".join(rest[len(want) :])
     else:

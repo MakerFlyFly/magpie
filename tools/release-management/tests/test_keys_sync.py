@@ -864,14 +864,22 @@ def test_step_2_keys_file_branch_mismatch_is_refused(url: str) -> None:
     assert ("does not match" in message or "called KEYS" in message) and url in message
 
 
-def test_step_2_raw_branch_mismatch_reports_parsed_path() -> None:
-    url = "https://github.com/o/r/raw/refs/heads/release/2.x/dist/KEYS"
+@pytest.mark.parametrize("raw_repo", ["https://github.com/o/r/raw", "https://raw.githubusercontent.com/o/r"])
+@pytest.mark.parametrize(
+    ("suffix", "parsed_path"),
+    [("release/2.x/dist/KEYS", "'release/2.x/dist'"), ("KEYS", "<none>")],
+)
+def test_step_2_raw_branch_mismatch_reports_parsed_path(raw_repo: str, suffix: str, parsed_path: str) -> None:
+    url = f"{raw_repo}/refs/heads/{suffix}"
+    keys_branch = "release/1.x"
     with pytest.raises(render.RenderError) as exc:
-        git_step2(url, "release/1.x")
-    assert str(exc.value) == (
-        f"keys_file_branch 'release/1.x' does not match keys_file_url {url!r}. "
-        "The parsed path before KEYS ('release/2.x/dist') must start with the configured branch."
-    )
+        git_step2(url, keys_branch)
+    message = str(exc.value)
+    assert f"keys_file_branch {keys_branch!r}" in message
+    assert f"keys_file_url {url!r}" in message
+    assert parsed_path in message
+    assert "Set keys_file_branch" in message
+    assert "supply a KEYS URL" in message
 
 
 def test_step_2_keys_file_branch_naming_the_whole_path_is_refused() -> None:
