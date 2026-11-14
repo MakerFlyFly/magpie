@@ -21,8 +21,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast, overload
 
 from .. import config, mentions, model, people
 from . import classify as stale_classify
@@ -34,20 +36,69 @@ FAMILY = "stale-sweep"
 #: Where `classify` keeps its output for `render` and `recap`.
 CLASSIFIED = "stale-classify.json"
 
+_NamespaceT = TypeVar("_NamespaceT")
 
-def add_parsers(sub: Any) -> None:
-    family = sub.add_parser(FAMILY, help="pr-stale-sweep")
-    cmds = family.add_subparsers(dest="command", required=True)
 
-    pln = cmds.add_parser("plan", help="Step 0-1: thresholds, selector validation, the reads to save")
-    pln.add_argument(
+class _SelectorParser(argparse.ArgumentParser):
+    """Allow options between selector tokens on the commands that take them."""
+
+    intermix_selector = False
+
+    @overload
+    def parse_known_args(
+        self, args: Iterable[str] | None = None, namespace: None = None
+    ) -> tuple[argparse.Namespace, list[str]]: ...
+
+    @overload
+    def parse_known_args(
+        self, args: Iterable[str] | None, namespace: _NamespaceT
+    ) -> tuple[_NamespaceT, list[str]]: ...
+
+    @overload
+    def parse_known_args(self, *, namespace: _NamespaceT) -> tuple[_NamespaceT, list[str]]: ...
+
+    def parse_known_args(
+        self, args: Iterable[str] | None = None, namespace: _NamespaceT | None = None
+    ) -> tuple[argparse.Namespace | _NamespaceT, list[str]]:
+        if not self.intermix_selector:
+            return super().parse_known_args(args, namespace)
+
+        tokens = list(sys.argv[1:] if args is None else args)
+        # Keep everything after the first -- as literal selector tokens.
+        end = tokens.index("--") if "--" in tokens else len(tokens)
+        # The intermixed parser calls parse_known_args internally.
+        self.intermix_selector = False
+        try:
+            parsed, remaining = self.parse_known_intermixed_args(tokens[:end], namespace)
+        finally:
+            self.intermix_selector = True
+        cast(argparse.Namespace, parsed).selector.extend(tokens[end + 1 :])
+        return parsed, remaining
+
+
+def _add_selector(parser: _SelectorParser) -> None:
+    parser.intermix_selector = True
+    parser.add_argument("--dry-run", action="store_true", help="mark the sweep as a dry run")
+    parser.add_argument(
         "selector", nargs="*", help="the selector as typed: stale, label:<l>, warn:<N>, 42,88, …"
     )
 
-    cls = cmds.add_parser("classify", help="Steps 1-3: the pool, the per-PR state, one class per PR")
+
+def add_parsers(sub: Any) -> None:
+    family = sub.add_parser(FAMILY, help="pr-stale-sweep")
+    cmds = family.add_subparsers(dest="command", required=True, parser_class=_SelectorParser)
+
+    pln = cmds.add_parser(
+        "plan", allow_abbrev=False, help="Step 0-1: thresholds, selector validation, the reads to save"
+    )
+    _add_selector(pln)
+
+    cls = cmds.add_parser(
+        "classify", allow_abbrev=False, help="Steps 1-3: the pool, the per-PR state, one class per PR"
+    )
     cls.add_argument("--saved-dir", type=Path, required=True)
     cls.add_argument("--now", default=None)
-    cls.add_argument("selector", nargs="*")
+    _add_selector(cls)
 
     ren = cmds.add_parser("render", help="Step 4: the comment for one proposal")
     mentions.add_flag(ren)
@@ -74,12 +125,11 @@ def _now(value: str | None) -> dt.datetime:
 
 def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     cfg = mentions.apply_flag(config.load(args.project_root, args.config_dir), args)
-    if args.command == "plan":
-        return stale_plan.build(
-            args.selector, args.project_root, args.config_dir, cfg.committers_team
-        ).as_dict()
-    if args.command == "classify":
-        plan = stale_plan.build(args.selector, args.project_root, args.config_dir, cfg.committers_team)
+    if args.command in {"plan", "classify"}:
+        tokens = [*args.selector, "--dry-run"] if args.dry_run else args.selector
+        plan = stale_plan.build(tokens, args.project_root, args.config_dir, cfg.committers_team)
+        if args.command == "plan":
+            return plan.as_dict()
         if plan.error:
             return {"error": plan.error, "plan": plan.as_dict()}
         saved: Path = args.saved_dir

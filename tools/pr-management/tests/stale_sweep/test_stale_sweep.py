@@ -352,6 +352,113 @@ def test_record_refuses_a_non_github_url(tmp_path: Path) -> None:
 # --- the CLI ---------------------------------------------------------------------------------
 
 
+def _selector_args(command: str, root: Path, *nodes: dict[str, Any]) -> list[str]:
+    args = ["--project-root", str(root), "stale-sweep", command]
+    if command == "classify":
+        page = [{"data": {"search": {"nodes": list(nodes)}}}]
+        (root / P.PAGES).write_text(json.dumps(page), encoding="utf-8")
+        args += ["--saved-dir", str(root), "--now", NOW.isoformat()]
+    return args
+
+
+@pytest.mark.parametrize("command", ["plan", "classify"])
+@pytest.mark.parametrize(
+    ("selector", "dry_run", "warn_days"),
+    [
+        pytest.param(["--dry-run"], True, 45, id="flag-only"),
+        pytest.param(["--dry-run", "stale", "warn:30"], True, 30, id="flag-before-selector"),
+        pytest.param(["stale", "warn:30", "--dry-run"], True, 30, id="flag-after-selector"),
+        pytest.param(["stale", "--dry-run", "warn:30"], True, 30, id="flag-within-selector"),
+        pytest.param(["stale", "warn:30", "dry-run"], True, 30, id="bare-token"),
+        pytest.param(["stale", "--dry-run", "dry-run"], True, 45, id="mixed-dry-run-tokens"),
+        pytest.param(["--", "stale", "warn:30", "--dry-run"], True, 30, id="end-of-options"),
+        pytest.param(["stale", "--dry-run", "--", "warn:30", "--dry-run"], True, 30, id="repeated-flag"),
+        pytest.param(["stale", "warn:30"], False, 30, id="no-flag"),
+    ],
+)
+def test_cli_dry_run(
+    command: str,
+    selector: list[str],
+    dry_run: bool,
+    warn_days: int,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from pr_management import cli
+
+    args = _selector_args(command, tmp_path, node(42, idle=48))
+    assert cli.main([*args, *selector]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["dry_run"] is dry_run
+    if command == "classify":
+        assert [p["class"] for p in result["proposals"]] == ["REQUEST-UPDATE"]
+        assert result["thresholds"]["warn_days"] == warn_days
+    else:
+        assert result["error"] is None
+        assert result["warn_days"] == warn_days
+
+
+@pytest.mark.parametrize("command", ["plan", "classify"])
+def test_cli_dry_run_keeps_selectors(
+    command: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from pr_management import cli
+
+    args = _selector_args(
+        command, tmp_path, node(42, idle=38, labels=["x"]), node(88), node(99, labels=["x"])
+    )
+    assert cli.main([*args, "42,88", "label:x", "warn:30"]) == 0
+    regular = json.loads(capsys.readouterr().out)
+    assert regular.pop("dry_run") is False
+
+    assert cli.main([*args, "42,88", "--dry-run", "label:x", "warn:30"]) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry.pop("dry_run") is True
+    assert dry == regular
+    if command == "classify":
+        assert [(p["number"], p["class"]) for p in dry["proposals"]] == [(42, "REQUEST-UPDATE")]
+        assert dry["thresholds"]["warn_days"] == 30
+    else:
+        assert dry["error"] is None
+        assert dry["explicit_numbers"] == [42, 88]
+        assert dry["label_filter"] == "x"
+        assert dry["warn_days"] == 30
+
+
+@pytest.mark.parametrize("command", ["plan", "classify"])
+@pytest.mark.parametrize("option", ["--dry", "--d", "--unknown-option"])
+def test_cli_rejects_unknown_selector_options(
+    command: str, option: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from pr_management import cli
+
+    with pytest.raises(SystemExit) as error:
+        cli.main([*_selector_args(command, tmp_path), "stale", option])
+
+    assert error.value.code == 2
+    assert f"unrecognized arguments: {option}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["plan", "classify"])
+@pytest.mark.parametrize("literal", ["--unknown-option", "--"], ids=["unknown-option", "second-separator"])
+def test_cli_preserves_selector_tokens_after_separator(
+    command: str, literal: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from pr_management import cli
+
+    args = _selector_args(command, tmp_path)
+    assert cli.main([*args, "stale", "--dry-run", "--", literal]) == 0
+
+    output = capsys.readouterr()
+    assert not output.err
+    result = json.loads(output.out)
+    assert result.get("error") == f"unrecognised selector {literal!r}"
+    plan = result if command == "plan" else result["plan"]
+    assert plan["dry_run"] is True
+    assert plan["reads"] == []
+
+
 def test_cli_classify_then_render(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from pr_management import cli
 
