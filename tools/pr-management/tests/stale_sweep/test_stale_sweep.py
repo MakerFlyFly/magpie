@@ -440,6 +440,25 @@ def test_cli_rejects_unknown_selector_options(
     assert f"unrecognized arguments: {option}" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("command", ["plan", "classify"])
+@pytest.mark.parametrize("literal", ["--unknown-option", "--"], ids=["unknown-option", "second-separator"])
+def test_cli_preserves_selector_tokens_after_separator(
+    command: str, literal: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from pr_management import cli
+
+    args = _selector_args(command, tmp_path)
+    assert cli.main([*args, "stale", "--dry-run", "--", literal]) == 0
+
+    output = capsys.readouterr()
+    assert not output.err
+    result = json.loads(output.out)
+    assert result.get("error") == f"unrecognised selector {literal!r}"
+    plan = result if command == "plan" else result["plan"]
+    assert plan["dry_run"] is True
+    assert plan["reads"] == []
+
+
 def test_cli_classify_then_render(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from pr_management import cli
 
