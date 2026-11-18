@@ -30,7 +30,7 @@ rule prescribes:
 * otherwise, exhaustive coverage → `compatible`; partial coverage → `unknown`.
 
 Specifiers follow PEP 440's operators on dotted numeric versions
-(`==`, `!=`, `>=`, `<=`, `>`, `<`, `~=`, `==X.*`); markers are compared as
+(`==`, `!=`, `>=`, `<=`, `>`, `<`, `~=`, `==X.*`, `!=X.*`); markers are compared as
 literal environment names.
 """
 
@@ -43,14 +43,25 @@ from typing import Any
 _SPEC = re.compile(r"^\s*(==|!=|>=|<=|~=|>|<)\s*([0-9][0-9A-Za-z.*+-]*)\s*$")
 
 
-def version(value: str) -> tuple[int, ...]:
+def _release_parts(value: str) -> list[int]:
     parts = []
     for piece in value.split("."):
         digits = re.match(r"\d+", piece)
         parts.append(int(digits.group(0)) if digits else 0)
+    return parts
+
+
+def version(value: str) -> tuple[int, ...]:
+    parts = _release_parts(value)
     while len(parts) > 1 and parts[-1] == 0:
         parts.pop()
     return tuple(parts)
+
+
+def _matches_release_prefix(candidate: tuple[int, ...], prefix: list[int]) -> bool:
+    width = len(prefix)
+    padded = candidate + (0,) * max(0, width - len(candidate))
+    return padded[:width] == tuple(prefix)
 
 
 @dataclass(frozen=True)
@@ -61,8 +72,8 @@ class Clause:
     def admits(self, candidate: str) -> bool:
         v = version(candidate)
         if self.value.endswith(".*"):
-            prefix = version(self.value[:-2])
-            hit = v[: len(prefix)] == prefix
+            prefix = _release_parts(self.value[:-2])
+            hit = _matches_release_prefix(v, prefix)
             return hit if self.op == "==" else not hit
         target = version(self.value)
         if self.op == "==":
@@ -77,10 +88,10 @@ class Clause:
             return v > target
         if self.op == "<":
             return v < target
-        # ~=X.Y  ->  >=X.Y, ==X.*
-        base = version(self.value)
-        upper = base[:-1] if len(base) > 1 else base
-        return v >= base and v[: len(upper)] == upper
+        # ~=X.Y.Z  ->  >=X.Y.Z, ==X.Y.*
+        release = _release_parts(self.value)
+        prefix = release[:-1] if len(release) > 1 else release
+        return v >= target and _matches_release_prefix(v, prefix)
 
 
 def clauses(specifier: str) -> list[Clause]:

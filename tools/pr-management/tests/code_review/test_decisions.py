@@ -412,6 +412,53 @@ def test_an_empty_intersection_is_broken_without_a_failing_resolution() -> None:
     assert result["classification"] == "broken" and result["evidence"] == {"uninstallable_in": ["*"]}
 
 
+@pytest.mark.parametrize(
+    ("specifier", "minimum", "available_versions"),
+    [
+        ("==1.0.*", ">=1.2", ["1.0.0", "1.0.5", "1.2.0", "1.3.0"]),
+        ("~=1.4.0", ">=1.5", ["1.4.0", "1.4.2", "1.5.0", "1.6.1"]),
+    ],
+)
+def test_release_prefix_precision_can_make_an_intersection_empty(
+    specifier: str, minimum: str, available_versions: list[str]
+) -> None:
+    result = deps.classify(
+        {
+            "package": "libfoo",
+            "paths": [{"via": "app", "specifier": specifier}, {"via": "app -> bridge", "specifier": minimum}],
+            "available_versions": available_versions,
+            "exhaustive": True,
+        }
+    )
+    assert result["classification"] == "broken"
+    assert result["environments"]["*"]["satisfying"] == []
+    assert result["evidence"] == {"uninstallable_in": ["*"]}
+    assert result["runtime_finding_allowed"] is True
+
+
+@pytest.mark.parametrize(
+    ("specifier", "candidate", "expected"),
+    [
+        ("==1.0.*", "1", True),
+        ("==1.0.*", "1.0.5", True),
+        ("==1.0.0.*", "1.0.1", False),
+        ("!=1.0.*", "1", False),
+        ("!=1.0.*", "1.2", True),
+        ("~=1.0.0", "1", True),
+        ("~=1.0.0", "1.5", False),
+        ("~=1.0", "1.5", True),
+        ("~=1.4.0", "1.4", True),
+        ("~=1.4.2", "1.4.1", False),
+        ("~=1.4.2", "1.4.2", True),
+        ("==1.0", "1.0.0", True),
+        ("<1.0", "1.0.0", False),
+    ],
+)
+def test_numeric_dependency_specifier(specifier: str, candidate: str, expected: bool) -> None:
+    (clause,) = deps.clauses(specifier)
+    assert clause.admits(candidate) is expected
+
+
 def test_a_satisfying_version_without_the_api_is_broken() -> None:
     result = deps.classify(
         {
