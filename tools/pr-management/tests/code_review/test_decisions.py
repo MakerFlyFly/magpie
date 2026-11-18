@@ -459,6 +459,39 @@ def test_numeric_dependency_specifier(specifier: str, candidate: str, expected: 
     assert clause.admits(candidate) is expected
 
 
+@pytest.mark.parametrize("specifier", ["~=1.4.post1", "~=1.4.dev0"])
+def test_suffix_does_not_narrow_compatible_release_intersection(specifier: str) -> None:
+    result = deps.classify(
+        {
+            "package": "libfoo",
+            "paths": [{"via": "app", "specifier": specifier}, {"via": "app -> bridge", "specifier": ">=1.5"}],
+            "available_versions": ["1.4.0", "1.5.0"],
+            "exhaustive": True,
+        }
+    )
+    assert result["classification"] == "compatible"
+    assert result["environments"]["*"]["satisfying"] == ["1.5.0"]
+    assert result["evidence"] == {"exhaustive": True}
+    assert result["runtime_finding_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    ("specifier", "candidate", "expected"),
+    [
+        ("~=1.4a1.dev0", "1.5.0", True),
+        ("~=1.0.post1", "1.1", True),
+        ("~=1.4.0.post1", "1.4.1", True),
+        ("~=1.4.0.post1", "1.5.0", False),
+        ("==1.0.*", "1+build.2", True),
+        ("!=1.0.*", "1+build.2", False),
+        ("~=1.4.0.0", "1.4+build.2", True),
+    ],
+)
+def test_release_prefix_ignores_suffixes(specifier: str, candidate: str, expected: bool) -> None:
+    (clause,) = deps.clauses(specifier)
+    assert clause.admits(candidate) is expected
+
+
 def test_a_satisfying_version_without_the_api_is_broken() -> None:
     result = deps.classify(
         {

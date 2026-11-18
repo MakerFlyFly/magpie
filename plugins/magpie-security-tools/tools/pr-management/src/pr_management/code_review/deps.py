@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from typing import Any
 
 _SPEC = re.compile(r"^\s*(==|!=|>=|<=|~=|>|<)\s*([0-9][0-9A-Za-z.*+-]*)\s*$")
+_RELEASE_SEGMENT = re.compile(r"\d+(?:\.\d+)*")
 
 
 def _release_parts(value: str) -> list[int]:
@@ -58,10 +59,16 @@ def version(value: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def _matches_release_prefix(candidate: tuple[int, ...], prefix: list[int]) -> bool:
+def _prefix_release_parts(value: str) -> list[int]:
+    release = _RELEASE_SEGMENT.match(value)
+    return _release_parts(release[0] if release else value)
+
+
+def _matches_release_prefix(candidate: str, prefix: list[int]) -> bool:
+    release = _prefix_release_parts(candidate)
     width = len(prefix)
-    padded = candidate + (0,) * max(0, width - len(candidate))
-    return padded[:width] == tuple(prefix)
+    padded = release + [0] * max(0, width - len(release))
+    return padded[:width] == prefix
 
 
 @dataclass(frozen=True)
@@ -70,11 +77,11 @@ class Clause:
     value: str
 
     def admits(self, candidate: str) -> bool:
-        v = version(candidate)
         if self.value.endswith(".*"):
             prefix = _release_parts(self.value[:-2])
-            hit = _matches_release_prefix(v, prefix)
+            hit = _matches_release_prefix(candidate, prefix)
             return hit if self.op == "==" else not hit
+        v = version(candidate)
         target = version(self.value)
         if self.op == "==":
             return v == target
@@ -89,9 +96,9 @@ class Clause:
         if self.op == "<":
             return v < target
         # ~=X.Y.Z  ->  >=X.Y.Z, ==X.Y.*
-        release = _release_parts(self.value)
+        release = _prefix_release_parts(self.value)
         prefix = release[:-1] if len(release) > 1 else release
-        return v >= target and _matches_release_prefix(v, prefix)
+        return v >= target and _matches_release_prefix(candidate, prefix)
 
 
 def clauses(specifier: str) -> list[Clause]:
