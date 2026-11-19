@@ -492,6 +492,58 @@ def test_release_prefix_ignores_suffixes(specifier: str, candidate: str, expecte
     assert clause.admits(candidate) is expected
 
 
+@pytest.mark.parametrize(
+    ("specifier", "candidate", "expected"),
+    [
+        ("~=1.0.1", "1+build.2", False),
+        ("~=1.0.1", "1.0+build.2", False),
+        ("~=1.0.1", "1.0.1+build.2", True),
+        ("~=1.4.0.1", "1.4+build.2", False),
+        (">=1.0.1", "1+build.2", False),
+        ("<1.1", "1+build.2", True),
+        ("<=1.1", "1+build.2", True),
+        (">1.1", "1+build.2", False),
+        ("==1.2", "1+build.2", False),
+        ("!=1.2", "1+build.2", True),
+    ],
+)
+def test_local_label_does_not_change_release_comparison(
+    specifier: str, candidate: str, expected: bool
+) -> None:
+    (clause,) = deps.clauses(specifier)
+    assert clause.admits(candidate) is expected
+
+
+@pytest.mark.parametrize("specifier", ["~=1.0.1", ">=1.0.1"])
+def test_local_label_cannot_satisfy_a_higher_release_bound(specifier: str) -> None:
+    result = deps.classify(
+        {
+            "package": "libfoo",
+            "paths": [{"via": "app", "specifier": specifier}],
+            "available_versions": ["1+build.2", "1.0.0"],
+            "exhaustive": True,
+        }
+    )
+    assert result["classification"] == "broken"
+    assert result["environments"]["*"]["satisfying"] == []
+    assert result["evidence"] == {"uninstallable_in": ["*"]}
+    assert result["runtime_finding_allowed"] is True
+
+
+def test_local_labels_do_not_change_ledger_release_order() -> None:
+    result = deps.classify(
+        {
+            "package": "libfoo",
+            "paths": [{"via": "app", "specifier": ">=1"}],
+            "available_versions": ["1.1", "1+build.2", "1.0.5"],
+            "exhaustive": True,
+        }
+    )
+    assert result["classification"] == "compatible"
+    assert result["environments"]["*"]["satisfying"] == ["1+build.2", "1.0.5", "1.1"]
+    assert result["runtime_finding_allowed"] is False
+
+
 def test_a_satisfying_version_without_the_api_is_broken() -> None:
     result = deps.classify(
         {

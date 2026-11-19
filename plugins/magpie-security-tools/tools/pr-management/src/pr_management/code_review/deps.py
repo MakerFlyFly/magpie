@@ -31,7 +31,9 @@ rule prescribes:
 
 Specifiers follow PEP 440's operators on dotted numeric versions
 (`==`, `!=`, `>=`, `<=`, `>`, `<`, `~=`, `==X.*`, `!=X.*`); markers are compared as
-literal environment names.
+literal environment names. Numeric comparisons and ledger ordering use the
+leading release segments. Suffix precedence for pre-releases, post-releases
+and development releases is outside this numeric model.
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ def _release_parts(value: str) -> list[int]:
 
 
 def version(value: str) -> tuple[int, ...]:
-    parts = _release_parts(value)
+    parts = _prefix_release_parts(value)
     while len(parts) > 1 and parts[-1] == 0:
         parts.pop()
     return tuple(parts)
