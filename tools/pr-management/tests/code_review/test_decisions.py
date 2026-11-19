@@ -544,6 +544,67 @@ def test_local_labels_do_not_change_ledger_release_order() -> None:
     assert result["runtime_finding_allowed"] is False
 
 
+@pytest.mark.parametrize("op", ["==", "!="])
+@pytest.mark.parametrize(
+    ("value", "candidate", "equal"),
+    [
+        ("1.0+build.2", "1.0", False),
+        ("1.0+build.2", "1.0+build.1", False),
+        ("1.0+build.2", "1.0+build.2", True),
+        ("1.0+BUILD.02", "1+build_2", True),
+        ("01.00+build-2", "1.0.0+BUILD.002", True),
+        ("1.0+build_2", "1.0+build.02", True),
+        ("1.0+build.2", "1.0.1+build.2", False),
+        ("1.0", "1.0+build.2", True),
+        ("1.0+foo02", "1+foo2", False),
+        ("1.0+02", "1+2", True),
+    ],
+)
+def test_explicit_local_label_matches_normalized_label(
+    op: str, value: str, candidate: str, equal: bool
+) -> None:
+    (clause,) = deps.clauses(f"{op}{value}")
+    assert clause.admits(candidate) is (equal if op == "==" else not equal)
+
+
+@pytest.mark.parametrize(
+    ("specifier", "available", "satisfying", "classification"),
+    [
+        ("==1.0+build.2", ["1.0", "1.0+build.1"], [], "broken"),
+        (
+            "==1.0+build.2",
+            ["1.0", "1.0+build.1", "1.0+build.2"],
+            ["1.0+build.2"],
+            "compatible",
+        ),
+        (
+            "!=1.0+build.2",
+            ["1.0", "1.0+build.1", "1.0+build.2"],
+            ["1.0", "1.0+build.1"],
+            "compatible",
+        ),
+    ],
+)
+def test_explicit_local_label_dependency_ledger(
+    specifier: str, available: list[str], satisfying: list[str], classification: str
+) -> None:
+    result = deps.classify(
+        {
+            "package": "libfoo",
+            "paths": [{"via": "app", "specifier": specifier}],
+            "available_versions": available,
+            "exhaustive": True,
+        }
+    )
+    assert result["classification"] == classification
+    assert result["environments"]["*"]["satisfying"] == satisfying
+    assert result["runtime_finding_allowed"] is (classification == "broken")
+    if classification == "broken":
+        assert result["evidence"] == {"uninstallable_in": ["*"]}
+    else:
+        assert result["evidence"] == {"exhaustive": True}
+
+
 def test_a_satisfying_version_without_the_api_is_broken() -> None:
     result = deps.classify(
         {

@@ -32,8 +32,10 @@ rule prescribes:
 Specifiers follow PEP 440's operators on dotted numeric versions
 (`==`, `!=`, `>=`, `<=`, `>`, `<`, `~=`, `==X.*`, `!=X.*`); markers are compared as
 literal environment names. Numeric comparisons and ledger ordering use the
-leading release segments. Suffix precedence for pre-releases, post-releases
-and development releases is outside this numeric model.
+leading release segments. For equality and exclusion, an explicit local
+label in the constraint is normalized and matched as well. Suffix precedence
+for pre-releases, post-releases and development releases is outside this
+numeric model.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-_SPEC = re.compile(r"^\s*(==|!=|>=|<=|~=|>|<)\s*([0-9][0-9A-Za-z.*+-]*)\s*$")
+_SPEC = re.compile(r"^\s*(==|!=|>=|<=|~=|>|<)\s*([0-9][0-9A-Za-z.*+_-]*)\s*$")
 _RELEASE_SEGMENT = re.compile(r"\d+(?:\.\d+)*")
 
 
@@ -73,6 +75,11 @@ def _matches_release_prefix(candidate: str, prefix: list[int]) -> bool:
     return padded[:width] == prefix
 
 
+def _local_parts(value: str) -> tuple[int | str, ...]:
+    parts = re.split(r"[._-]", value.lower())
+    return tuple(int(part) if part.isdecimal() else part for part in parts)
+
+
 @dataclass(frozen=True)
 class Clause:
     op: str
@@ -85,10 +92,13 @@ class Clause:
             return hit if self.op == "==" else not hit
         v = version(candidate)
         target = version(self.value)
-        if self.op == "==":
-            return v == target
-        if self.op == "!=":
-            return v != target
+        if self.op in {"==", "!="}:
+            hit = v == target
+            if "+" in self.value:
+                hit = hit and _local_parts(candidate.partition("+")[2]) == _local_parts(
+                    self.value.partition("+")[2]
+                )
+            return hit if self.op == "==" else not hit
         if self.op == ">=":
             return v >= target
         if self.op == "<=":
