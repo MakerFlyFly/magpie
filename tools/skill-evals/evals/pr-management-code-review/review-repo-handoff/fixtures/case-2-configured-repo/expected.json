@@ -1,5 +1,6 @@
 {
   "render_repo": "acme/product",
   "slop_comment_repo": "acme/product",
-  "footer_project": "Apache Product"
+  "footer_project": "Apache Product",
+  "pass_head_pushable": true
 }

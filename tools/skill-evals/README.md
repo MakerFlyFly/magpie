@@ -30,7 +30,7 @@ Suites are currently implemented for:
 - **issue-reproducer** — 33 cases across 8 suites (step-1-inventory, step-2-pick-candidate, step-2-runtime-select, step-3-classify-shape, step-5.5-confirm, step-7-verify, step-8-baselines, step-10-compose-verdict)
 - **issue-fix-workflow** — 20 cases across 7 steps (step-2-locate-area, step-6-scope-check, step-7-compose-commit, step-8-handback)
 - **issue-reassess-stats** — 8 cases across 3 steps (step-1-fetch-verdicts, step-2-classify, step-3-aggregate)
-- **pr-management-code-review** — 62 cases across 17 suites. The 13 scripted suites moved to `tools/pr-management/tests/code_review`.
+- **pr-management-code-review** — 63 cases across 17 suites. The 13 scripted suites moved to `tools/pr-management/tests/code_review`.
 - **pr-management-thread-mentor** — 6 cases across 2 steps (intervention, tone-checks); the hand-off triggers and deterministic tone rules are pytest-tested in `tools/pr-management`
 - **pr-management-stats** — 6 cases across 1 step (build-loop)
 - **pr-management-triage** — 54 cases across 8 steps (backport-check, classify-loop, deliver-note, guard-reroute, terminal-links, interaction-progress, action-journal, session-recovery); the pre-filters, decision table and pagination are pytest-tested in `tools/pr-management`

@@ -269,7 +269,12 @@ uv run --project <framework>/tools/pr-management pr-management code-review <subc
 | `slop-comment` | the slop-warning body, the comment, close and lock commands, and the report link |
 | `session record`, `session summary` | the session counts and summary text |
 
-`render` and `slop-comment` accept `--repo <owner>/<name>` for all generated commands and links to the PR. Both default to `upstream_repo` from `project.md` and require an explicit target when that setting is missing. Before writing, they check the PR number and URL of any saved `gql-cr-pr` read they use. `slop-comment` also supports a standalone warning or a saved directory containing only `permission.txt`.
+`render` and `slop-comment` accept `--repo <owner>/<name>` for all generated commands and PR links. Both default to `upstream_repo` from `project.md` and require an explicit target when that setting is missing.
+Run the generated commands with `gh` targeting `github.com`. The renderers check the saved PR number and its URL, `https://github.com/<repo>/pull/<N>`. A custom GitHub Enterprise hostname fails that check. The slop report link also uses `github.com`.
+After a rename or transfer, select the current canonical `owner/name` and refresh the read with the matching repository policy.
+
+Use a distinct top-level `workspace` in the read policy for each target repository. On a switch, refresh the PR, patch, permission and liveness reads in that target's `<workspace>/saved` and use it as `--saved-dir` throughout the review. The PR identity check covers the full PR record. The other saved files depend on this directory isolation.
+`slop-comment` also supports a standalone warning or a saved directory containing only `permission.txt`.
 
 When a saved read is missing, a subcommand returns `needs: [{op, params, save, why}]`; the skill runs each bare `vetted-op-read --save` and re-runs it.
 The agent keeps reading the diff, writing findings and judging severity.

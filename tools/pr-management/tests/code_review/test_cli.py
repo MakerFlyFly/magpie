@@ -888,6 +888,27 @@ def _renderer_args(command: str, saved: Path, out_dir: Path) -> list[str]:
     return [*args, "--findings", str(findings), "--summary", str(text), "--disposition", "COMMENT"]
 
 
+def _assert_renderer_refuses_before_writing(
+    capsys: pytest.CaptureFixture[str], args: list[str], out_dir: Path, *diagnostics: str
+) -> None:
+    for previous_files in (
+        {},
+        {"review-body-7.md": "body", "review-payload-7.json": "{}", "slop-warning-7.md": "warning"},
+    ):
+        if previous_files:
+            out_dir.mkdir()
+            for name, contents in previous_files.items():
+                (out_dir / name).write_text(contents)
+        with pytest.raises(SystemExit) as error:
+            cli.main(args)
+        message = str(error.value)
+        for detail in ("cr-pr-7.json", "gql-cr-pr 7", *diagnostics):
+            assert detail in message
+        assert capsys.readouterr().out == ""
+        assert out_dir.exists() == bool(previous_files)
+        assert {file.name: file.read_text() for file in out_dir.glob("*")} == previous_files
+
+
 @pytest.mark.parametrize("command", ["render", "slop-comment"])
 @pytest.mark.parametrize(
     ("repo_override", "identity"),
@@ -934,20 +955,44 @@ def test_command_renderer_checks_the_saved_pr_before_writing(
     if repo_override:
         args.extend(["--repo", repo_override])
     expected_url = f"https://github.com/{repo_override or 'acme/product'}/pull/7"
-    for previous_files in (
-        {},
-        {"review-body-7.md": "body", "review-payload-7.json": "{}", "slop-warning-7.md": "warning"},
-    ):
-        if previous_files:
-            out_dir.mkdir()
-            for name, contents in previous_files.items():
-                (out_dir / name).write_text(contents)
-        with pytest.raises(SystemExit) as error:
-            cli.main(args)
-        assert expected_url in str(error.value) and "gql-cr-pr" in str(error.value)
-        assert capsys.readouterr().out == ""
-        assert out_dir.exists() == bool(previous_files)
-        assert {file.name: file.read_text() for file in out_dir.glob("*")} == previous_files
+    _assert_renderer_refuses_before_writing(capsys, args, out_dir, expected_url, "canonical owner/name")
+
+
+@pytest.mark.parametrize("command", ["render", "slop-comment"])
+@pytest.mark.parametrize(
+    ("contents", "diagnostic"),
+    [
+        pytest.param("{\n", "invalid JSON at line 2, column 1", id="truncated-json"),
+        pytest.param("[]", "root must be a JSON object", id="root-list"),
+        pytest.param('{"data": [1]}', "data must be a JSON object", id="data-list"),
+        pytest.param(
+            '{"data": {"repository": false}}', "data.repository must be a JSON object", id="repository-bool"
+        ),
+        pytest.param(
+            '{"data": {"repository": {"pullRequest": [1]}}}',
+            "data.repository.pullRequest must be a JSON object",
+            id="pr-list",
+        ),
+        pytest.param(
+            '{"data": {"repository": {"pullRequest": null}}}',
+            "data.repository.pullRequest must be a JSON object",
+            id="pr-null",
+        ),
+    ],
+)
+def test_command_renderer_diagnoses_malformed_saved_reads(
+    capsys: pytest.CaptureFixture[str],
+    project: Path,
+    saved: Path,
+    tmp_path: Path,
+    command: str,
+    contents: str,
+    diagnostic: str,
+) -> None:
+    (saved / "cr-pr-7.json").write_text(contents, encoding="utf-8")
+    out_dir = tmp_path / "out"
+    args = ["--config-dir", str(project), "code-review", *_renderer_args(command, saved, out_dir)]
+    _assert_renderer_refuses_before_writing(capsys, args, out_dir, diagnostic)
 
 
 @pytest.mark.parametrize("command", ["render", "slop-comment"])

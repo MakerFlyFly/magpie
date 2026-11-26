@@ -20,6 +20,8 @@ selected protocol works (the skill uses HTTPS GraphQL queries via
 `gh api`; SSH-only setups are fine because the API path doesn't
 go through SSH).
 
+Before saving the permission, resolve the [target repository](#repo-override)
+and select its read policy and [save directory](#a-save-directory-for-the-reads).
 The active account must additionally be a **collaborator** on
 the target repo (`<upstream>` by default): without collaborator
 access the eventual post returns `HTTP 403: Resource not accessible
@@ -46,7 +48,10 @@ maintainer to run `gh auth login`. Do not proceed.
 
 ### A save directory for the reads
 
-Every saved read goes through `vetted-op-read --save`, which writes only into a `saved/` directory under the vetted-ops workspace that holds a `.vetted-ops-save` marker. It creates neither.
+Give each target repository a distinct top-level `workspace` in its read policy.
+`vetted-op-read --save` takes one filename and writes to `<workspace>/saved`, which must already contain a `.vetted-ops-save` marker.
+When switching repositories, fetch the PR, diff, permission, liveness and other review inputs into the new target's workspace.
+Pass that same directory as `--saved-dir` throughout the review. The patch, permission and liveness files carry no repository identity of their own.
 If a save refuses with *"holds no .vetted-ops-save file"* or *"is unusable"*, at any point in the run, ask the maintainer to create them (the workspace path is in the refusal):
 
 ```bash
@@ -181,8 +186,10 @@ Otherwise use `upstream_repo` from `project.md`. Use that target for all
 checks and pass it as `--repo <repo>` on every `code-review render` or
 `code-review slop-comment` call, including when re-rendering a draft.
 If the project has no `upstream_repo`, supply the repository explicitly.
-When a renderer uses a saved `gql-cr-pr` read, its PR number and URL must
-match the target. Refresh the read for `<repo>` if they differ.
+When a renderer uses a saved `gql-cr-pr` read, its number must equal `<N>`
+and its URL must match `https://github.com/<repo>/pull/<N>`. These renderers support GitHub.com
+PR URLs. After a rename or transfer, select the current canonical `owner/name`
+in the selector or project configuration and fetch fresh inputs with its read policy.
 
 The project configuration supplies the project name and contributing link
 in review footers and slop warnings, and the rules for recognizing real CI.
@@ -197,8 +204,8 @@ For repos that aren't `<upstream>`, also check that the conventional
 gh label list --repo <repo> --search "area:" --limit 1
 ```
 
-(a bare `gh` command; the `repo:` override also needs a vetted-ops
-policy whose `upstream` is that repository, passed with `--config`).
+For reads on an alternate target, pass the policy whose `[repos].upstream`
+names that repository to `vetted-op-read` with `--config`.
 
 If no `area:` labels exist, warn:
 
@@ -206,3 +213,29 @@ If no `area:` labels exist, warn:
 > match nothing here.*
 
 …and proceed with the rest of the selector.
+
+### FIXUP on a different repository
+
+Step 6 uses `--head-pushable` when the maintainer can edit the PR head.
+When `repo:` selects a different repository from `project.md`'s `upstream_repo`
+(or the default is absent), also check the Git write policy before passing the flag.
+Run both commands from the main checkout that would perform the fixup.
+
+```bash
+uvx --from ~/.claude/magpie/vetted-ops vetted-op-git policy
+uvx --from ~/.claude/magpie/vetted-ops vetted-op-read approval-status
+```
+
+The discovered policy must be approved. Its `[repos].upstream` must match
+`<repo>` case-insensitively and its effective Git host must be `github.com`.
+Check that its checkout, worktree root and `pr-management-code-review` caller
+grants cover the planned operations, including `git-push-pr-head` and any
+needed `git-merge-upstream`. A fork must allow maintainer edits.
+A head branch in the policy's upstream must match `upstream_push`.
+Both paths require an unprotected head.
+
+`--config` selects the read policy. Git writes use the policy discovered
+in the checkout. If any requirement fails or cannot be verified, omit
+`--head-pushable` and use the returned disposition, usually
+`COMMENT` for mechanical findings. Re-run `disposition` if the flag was
+already used.

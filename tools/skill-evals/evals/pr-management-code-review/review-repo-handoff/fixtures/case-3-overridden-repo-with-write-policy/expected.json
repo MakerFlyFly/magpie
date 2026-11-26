@@ -1,0 +1,6 @@
+{
+  "render_repo": "acme/product-site",
+  "slop_comment_repo": "acme/product-site",
+  "footer_project": "Apache Product",
+  "pass_head_pushable": true
+}

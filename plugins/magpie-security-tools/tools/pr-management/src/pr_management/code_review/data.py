@@ -332,11 +332,18 @@ def load_open(path: Path) -> list[PR]:
     return list(seen.values())
 
 
+def _pr_object(value: object, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be a JSON object")
+    return value
+
+
 def load_pr(path: Path, *, expected_target: tuple[str, int] | None = None) -> PR:
     """Read a saved `gql-cr-pr`, checking its repository and number when a target is supplied."""
-    data = json.loads(path.read_text(encoding="utf-8")).get("data") or {}
-    repo = data.get("repository") or {}
-    node = repo.get("pullRequest") or {}
+    root = _pr_object(json.loads(path.read_text(encoding="utf-8")), "root")
+    data = _pr_object(root.get("data"), "data")
+    repo = _pr_object(data.get("repository"), "data.repository")
+    node = _pr_object(repo.get("pullRequest"), "data.repository.pullRequest")
     if expected_target is not None:
         owner_repo, number = expected_target
         expected_url = f"https://github.com/{owner_repo}/pull/{number}"
@@ -348,9 +355,7 @@ def load_pr(path: Path, *, expected_target: tuple[str, int] | None = None) -> PR
             or not url.isascii()
             or url.lower() != expected_url.lower()
         ):
-            raise ValueError(
-                f"expected saved PR {expected_url}. Refresh gql-cr-pr {number} for {owner_repo}."
-            )
+            raise ValueError(f"expected saved PR {expected_url}. Check the current canonical owner/name")
     pr = from_node(node)
     pr.viewer = (data.get("viewer") or {}).get("login")
     pr.viewer_permission = repo.get("viewerPermission")

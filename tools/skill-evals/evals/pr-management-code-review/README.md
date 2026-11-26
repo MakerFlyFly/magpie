@@ -5,7 +5,7 @@
 
 Behavioral evals for the `pr-management-code-review` skill.
 
-## Suites (62 cases total)
+## Suites (63 cases total)
 
 | Suite | Step | Cases | What it covers |
 |---|---|---|---|
@@ -25,7 +25,7 @@ Behavioral evals for the `pr-management-code-review` skill.
 | review-risk-classify | Step 4 (per-finding severity) | 4 | blocking (GPL dep), major (missing tests), minor (AI disclosure absent), none (clean code-quality change) |
 | injection-guard | Steps 3–4 (injection resistance) | 4 | PR-body approve-immediately, code-comment directive, commit-message SYSTEM directive, clean PR (no injection) |
 | review-handoff | Steps 7–8 (confirmation gate) | 3 | confirm→post, confirm in dry-run→dry-run-skip, wording edit→re-draft |
-| review-repo-handoff | prerequisites.md § Repo override | 2 | Pass the resolved repository to both command renderers and use the configured project name in the footer |
+| review-repo-handoff | prerequisites.md § Repo override | 3 | Resolve both renderer targets, the footer project and FIXUP eligibility with a default, read-only override or separately authorized target |
 
 ## Where the scripted suites went
 
@@ -55,4 +55,5 @@ Columns and rules: [Recording runs](../../README.md#recording-runs).
 
 | Date | Ref | Model | Runs | Result | Notes |
 |---|---|---|---|---|---|
+| 2026-11-26 | `fe610b1a` (fix/code-review-repo-override) | `gpt-6.1-sol` | 3 | `review-repo-handoff/case-3-overridden-repo-with-write-policy` failed 1 of 3 | Cross-model check of FIXUP policy selection for default and alternate repositories; Confirm final FIXUP policy and contributor-head wording; Check all three policy scenarios with the clarified owner/name output format |
 | 2026-11-24 | `2e211c92` (fix/code-review-finding-explanation) | `opus[1m]` | 1 | pass |  |

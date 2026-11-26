@@ -120,8 +120,10 @@ same directory; the behaviour is unchanged.
   repository in every generated command and link to the PR.
   The selector and renderers share the repository name validation. Before
   writing, both renderers match any saved PR they use to the target by number
-  and canonical GitHub URL. The project configuration supplies the footer
-  identity, contribution link and real-CI rules.
+  and canonical GitHub.com URL. Each target's read policy uses a distinct
+  workspace for its saved PRs, diffs, permissions and liveness reads.
+  The project configuration supplies the footer identity, contribution link
+  and real-CI rules.
   `code-review session record --outcome` accepts `FIXUP` beside the three
   review events and the `skipped` / `slop-comment` / `slop-close` /
   `dry-run` outcomes, and the session summary counts it as a review (#2056).
@@ -399,9 +401,13 @@ same directory; the behaviour is unchanged.
   `FIXUP` is the default action: the maintainer commits those changes to the
   contributor's branch on confirmation, waits for CI, and approves with a body
   that lists what the fixup changed. A `major` is never fixed up.
-  The fixup runs through the vetted git operations under the `pr-management-code-review` caller:
-  the PR head is fetched in the sandbox over HTTPS, a worktree is made with `git-worktree-add`,
-  `vetted-op-checks` passes before `git-stage` / `git-commit`, and `git-push-branch` pushes it;
+  For an alternate repository the skill passes `--head-pushable` only when
+  the checkout's discovered, approved Git policy names that repository as
+  upstream and its paths and caller grants cover the fixup. A read policy
+  supplied with `--config` selects reads only.
+  The fixup runs through the vetted git operations under the `pr-management-code-review` caller.
+  The skill fetches the PR head in the sandbox over HTTPS and creates a worktree with `git-worktree-add`.
+  It runs `vetted-op-checks`, stages and commits the fixup, then uses `git-push-pr-head` to push to the verified PR head.
   Magpie's own vetted-ops policy grants that caller those operations (#2277).
   The "touching mine" selector uses GitHub data rather than `git log
   --author`, CODEOWNERS team ownership checks team membership rather than

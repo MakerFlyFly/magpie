@@ -8,3 +8,6 @@ The saved `code-review resolve` output is
 ```json
 {"selector": {"repo": null, "pr_number": 7}}
 ```
+
+The discovered, approved Git policy names `acme/product` as upstream on `github.com`.
+It lists the checkout, worktree root and required caller grants. The contributor's unprotected fork branch allows maintainer edits, CI is green and the review has one minor mechanical fix.

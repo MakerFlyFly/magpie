@@ -669,7 +669,13 @@ def _load_target_pr(path: Path, repo: str, number: int) -> data.PR:
     try:
         return data.load_pr(path, expected_target=(repo, number))
     except ValueError as exc:
-        raise SystemExit(f"pr-management: {exc}") from exc
+        if isinstance(exc, json.JSONDecodeError):
+            detail = f"invalid JSON at line {exc.lineno}, column {exc.colno} ({exc.msg})"
+        else:
+            detail = str(exc)
+        raise SystemExit(
+            f"pr-management: {path.name}: {detail}. Refresh gql-cr-pr {number} with the matching read policy."
+        ) from exc
 
 
 def _render(args: argparse.Namespace, cfg: config.Config) -> dict[str, Any]:
