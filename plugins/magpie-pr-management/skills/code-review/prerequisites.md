@@ -176,9 +176,13 @@ always on the headline anyway (Golden rule 10).
 
 ## Repo override
 
-If the maintainer passes `repo:<owner>/<name>`, all checks
-target that repo. For repos that aren't `<upstream>`, also
-check that the conventional `area:*` labels exist (since
+Use `selector.repo` from `code-review resolve` as `<repo>` when set.
+Otherwise use `upstream_repo` from `project.md`. Use that target for all
+checks and pass it as `--repo <repo>` on every `code-review render` or
+`code-review slop-comment` call, including when re-rendering a draft.
+
+For repos that aren't `<upstream>`, also check that the conventional
+`area:*` labels exist (since
 [`classifications/selector-area.md`](classifications/selector-area.md) supports `area:` filters):
 
 ```bash

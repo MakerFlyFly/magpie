@@ -348,7 +348,7 @@ Write the one-sentence summary line (never boilerplate) and run:
 
 ```bash
 uv run --project <framework>/tools/pr-management pr-management code-review render --saved-dir <workspace>/saved --pr <N> --findings <file> --summary <file> \
-  --disposition <DISP> --keep <answer> --reviewers <reviewers-output> --out-dir <scratch> \
+  --repo <repo> --disposition <DISP> --keep <answer> --reviewers <reviewers-output> --out-dir <scratch> \
   [--security-note <file>] [--inline off]
 ```
 

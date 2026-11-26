@@ -115,6 +115,9 @@ same directory; the behaviour is unchanged.
   under `not_open`.
   The selector output keeps `pr_number` (set when exactly one PR is named)
   beside `pr_numbers`.
+  The skill passes its resolved target repository to `render` and `slop-comment`
+  as `--repo`. Both commands default to `upstream_repo` and use the selected
+  repository in every generated command and link to the PR.
   `code-review session record --outcome` accepts `FIXUP` beside the three
   review events and the `skipped` / `slop-comment` / `slop-close` /
   `dry-run` outcomes, and the session summary counts it as a review (#2056).

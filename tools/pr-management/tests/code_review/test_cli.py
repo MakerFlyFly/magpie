@@ -144,9 +144,24 @@ def test_queue_asks_for_missing_reads(capsys: pytest.CaptureFixture[str], projec
     assert ops == {"team-members", "cr-viewer-commits"}
 
 
+@pytest.mark.parametrize("repo_override", [None, "acme/product-site"], ids=["configured-repo", "override"])
+@pytest.mark.parametrize("inline", ["on", "off"])
 def test_context_then_disposition_then_render(
-    capsys: pytest.CaptureFixture[str], project: Path, saved: Path, tmp_path: Path
+    capsys: pytest.CaptureFixture[str],
+    project: Path,
+    saved: Path,
+    tmp_path: Path,
+    repo_override: str | None,
+    inline: str,
 ) -> None:
+    repo_args = []
+    if repo_override is not None:
+        resolved = _run(
+            capsys, "--config-dir", str(project), "code-review", "resolve", f"repo:{repo_override}", "pr:7"
+        )
+        assert resolved["selector"]["repo"] == repo_override
+        repo_args = ["--repo", resolved["selector"]["repo"]]
+
     ctx = _run(
         capsys,
         "--config-dir",
@@ -214,14 +229,21 @@ def test_context_then_disposition_then_render(
         str(tmp_path / "out"),
         "--permission",
         "write",
+        "--inline",
+        inline,
+        *repo_args,
     )
-    assert out["footer_verified"] and "live_mentions" not in out and out["inline_threads"] == 1
+    expected_threads = 1 if inline == "on" else 0
+    assert out["footer_verified"] and "live_mentions" not in out
+    assert out["inline_threads"] == expected_threads
     # REST, not GraphQL: the path names the repository, so the public-surface scrub can see the target.
     argv = shlex.split(out["post_command"])
     assert argv[:2] == ["gh", "api"] and argv[3:] == ["-X", "POST", "--input", out["payload_file"]]
-    assert argv[2].startswith("repos/") and argv[2].endswith("/pulls/7/reviews")
+    repo = repo_override or "acme/product"
+    assert argv[2] == f"repos/{repo}/pulls/7/reviews"
+    assert shlex.split(out["verify_command"]) == ["gh", "api", argv[2]]
     payload = json.loads(Path(out["payload_file"]).read_text(encoding="utf-8"))
-    assert payload["event"] == "COMMENT" and len(payload["comments"]) == 1
+    assert payload["event"] == "COMMENT" and len(payload.get("comments", [])) == expected_threads
     body = Path(out["body_file"]).read_text()
     assert "Apache Product maintainer" in body and "https://example.org/contrib" in body
 
@@ -747,11 +769,13 @@ def test_session_records_fixup_as_a_review(
     assert "Reviewed: 2  (APPROVE 1, REQUEST_CHANGES 0, COMMENT 0, FIXUP 1)" in out["text"]
 
 
+@pytest.mark.parametrize("repo_override", [None, "acme/product-site"], ids=["configured-repo", "override"])
 def test_slop_comment_builds_quoted_commands(
-    capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path
+    capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path, repo_override: str | None
 ) -> None:
     issues = tmp_path / "issues.txt"
     issues.write_text("The `team_project/` directory looks like a class project.\n")
+    repo_args = ["--repo", repo_override] if repo_override is not None else []
     out = _run(
         capsys,
         "--config-dir",
@@ -759,14 +783,57 @@ def test_slop_comment_builds_quoted_commands(
         "code-review",
         "slop-comment",
         "--pr",
-        "9",
+        "7",
         "--issues",
         str(issues),
         "--out-dir",
         str(tmp_path / "o"),
+        *repo_args,
     )
-    assert shlex.split(out["comment_command"])[:4] == ["gh", "pr", "comment", "9"]
+    repo = repo_override or "acme/product"
+    assert shlex.split(out["comment_command"]) == [
+        "gh", "pr", "comment", "7", "--repo", repo, "--body-file", out["body_file"],
+    ]  # fmt: skip
+    assert [shlex.split(command) for command in out["close_commands"]] == [
+        ["gh", "pr", "close", "7", "--repo", repo],
+        ["gh", "api", "--method", "PUT", f"repos/{repo}/issues/7/lock", "--field", "lock_reason=off-topic"],
+    ]
+    assert f"https://github.com/{repo}/pull/7" in out["report_hint"]
     assert "Apache Product" in Path(out["body_file"]).read_text()
+
+
+@pytest.mark.parametrize(
+    "subcommand",
+    [
+        pytest.param(
+            (
+                "render",
+                "--saved-dir",
+                ".",
+                "--findings",
+                "unused",
+                "--summary",
+                "unused",
+                "--disposition",
+                "COMMENT",
+            ),
+            id="render",
+        ),
+        pytest.param(("slop-comment", "--issues", "unused"), id="slop-comment"),
+    ],
+)
+@pytest.mark.parametrize("repo", ["", "acme-product", "acme/product/extra", "acme/.."])
+def test_code_review_rejects_an_invalid_target_before_rendering(
+    capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path, subcommand: tuple[str, ...], repo: str
+) -> None:
+    out_dir = tmp_path / "out"
+    with pytest.raises(SystemExit, match="expected owner/name"):
+        cli.main([
+            "--config-dir", str(project), "code-review", *subcommand,
+            "--pr", "7", "--out-dir", str(out_dir), "--repo", repo,
+        ])  # fmt: skip
+    assert capsys.readouterr().out == ""
+    assert not out_dir.exists()
 
 
 def _slop_body(capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path, *extra: str) -> str:
@@ -984,27 +1051,29 @@ def _render_approve(
     )
 
 
+@pytest.mark.parametrize("repo_override", [None, "acme/product-site"], ids=["configured-repo", "override"])
 def test_auto_merge_becomes_the_default_and_render_emits_its_command(
-    capsys: pytest.CaptureFixture[str], project: Path, saved: Path, tmp_path: Path
+    capsys: pytest.CaptureFixture[str], project: Path, saved: Path, tmp_path: Path, repo_override: str | None
 ) -> None:
     _with_auto_merge(saved, method="REBASE")
     dis = _disposition(capsys, project, saved)
     assert dis["default"] == "APPROVE+AUTO-MERGE"
     assert "classifications/disposition-auto-merge.md" in dis["docs"]
-    out = _render_approve(capsys, project, saved, tmp_path, "--auto-merge", "--viewer", "alice")
+    repo_args = ["--repo", repo_override] if repo_override is not None else []
+    out = _render_approve(capsys, project, saved, tmp_path, "--auto-merge", "--viewer", "alice", *repo_args)
     assert shlex.split(out["auto_merge_command"]) == [
         "gh",
         "pr",
         "merge",
         "7",
         "--repo",
-        "acme/product",
+        repo_override or "acme/product",
         "--auto",
         "--rebase",
         "--match-head-commit",
         HEAD,
     ]
-    assert _render_approve(capsys, project, saved, tmp_path)["auto_merge_command"] is None
+    assert _render_approve(capsys, project, saved, tmp_path, *repo_args)["auto_merge_command"] is None
 
 
 @pytest.mark.parametrize(
