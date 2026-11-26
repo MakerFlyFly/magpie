@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0
      https://www.apache.org/licenses/LICENSE-2.0 -->
 
-The project configuration sets `upstream_repo` to `acme/product`.
+The project configuration sets `upstream_repo` to `acme/product` and `project_name` to `Apache Product`.
 The maintainer requested `pr:7`.
 The saved `code-review resolve` output is
 

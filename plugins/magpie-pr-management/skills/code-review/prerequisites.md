@@ -180,6 +180,14 @@ Use `selector.repo` from `code-review resolve` as `<repo>` when set.
 Otherwise use `upstream_repo` from `project.md`. Use that target for all
 checks and pass it as `--repo <repo>` on every `code-review render` or
 `code-review slop-comment` call, including when re-rendering a draft.
+If the project has no `upstream_repo`, supply the repository explicitly.
+When a renderer uses a saved `gql-cr-pr` read, its PR number and URL must
+match the target. Refresh the read for `<repo>` if they differ.
+
+The project configuration supplies the project name and contributing link
+in review footers and slop warnings, and the rules for recognizing real CI.
+The target repository's saved read supplies mergeability, auto-merge
+availability and the viewer's default merge method.
 
 For repos that aren't `<upstream>`, also check that the conventional
 `area:*` labels exist (since

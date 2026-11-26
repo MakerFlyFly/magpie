@@ -26,7 +26,7 @@ The first `context` run lists `cr-pr-template` and `gql-cr-pr-stack` under `need
 
 ```text
 PR #65934 — Fix scheduler N+1 on serialized Dag load
-  https://github.com/<upstream>/pull/65934
+  https://github.com/<repo>/pull/65934
   Author: alice (CONTRIBUTOR)
   Base:   main  •  Head: 4f8a09b1
   CI: SUCCESS  •  Threads: 0 unresolved  •  Reviews: 0
@@ -290,7 +290,7 @@ uv run --project <framework>/tools/pr-management pr-management code-review dispo
   [--unanswered-question] [--ci-diff-caused] [--head-pushable] [--addressed-thread <id>]...
 ```
 
-Pass `--unanswered-question` when an author question to the maintainers is open, `--ci-diff-caused` when you judged a CI failure is this diff's, and `--head-pushable` when `gh pr view <N> --json maintainerCanModify,isCrossRepository` shows the maintainer can push to the head (`maintainerCanModify`, or a branch in the base repository).
+Pass `--unanswered-question` when an author question to the maintainers is open, `--ci-diff-caused` when you judged a CI failure is this diff's, and `--head-pushable` when `gh pr view <N> --repo <repo> --json maintainerCanModify,isCrossRepository` shows the maintainer can push to the head (`maintainerCanModify`, or a branch in the base repository).
 Pass `--addressed-thread <id>` for each of `context`'s `outdated_threads` that the current code addresses ([`classifications/outdated-thread.md`](classifications/outdated-thread.md)). The result's `resolve_first` lists them: before the prompt, tell the maintainer to resolve each one to unblock the merge.
 Give each `minor` / `nit` finding whose fix is small and mechanical a `fixup` field: one line naming the exact change.
 The result's `docs` names the disposition and footer files to read. **Propose**:
@@ -420,7 +420,7 @@ GNOME Terminal, Windows Terminal, etc.) makes it clickable.
 The recommended format is one of:
 
 ```text
-PR #65981 — https://github.com/<upstream>/pull/65981 — <title>
+PR #65981 — https://github.com/<repo>/pull/65981 — <title>
 ```
 
 …or, in a multi-line headline, the URL on its own line so the
@@ -428,11 +428,11 @@ title stays scannable:
 
 ```text
 PR #65981 — <title>
-  https://github.com/<upstream>/pull/65981
+  https://github.com/<repo>/pull/65981
 ```
 
 Either is fine; the rule is that **the URL is always present**.
-Do not abbreviate to `<upstream>#65981` (that's
+Do not abbreviate to `<repo>#65981` (that's
 GitHub-web-only auto-linking and is not clickable in a
 terminal). Do not compress to `gh pr view 65981` (that's a
 shell command, not a link). Always emit the full HTTPS URL.

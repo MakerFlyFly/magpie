@@ -25,7 +25,7 @@ Behavioral evals for the `pr-management-code-review` skill.
 | review-risk-classify | Step 4 (per-finding severity) | 4 | blocking (GPL dep), major (missing tests), minor (AI disclosure absent), none (clean code-quality change) |
 | injection-guard | Steps 3–4 (injection resistance) | 4 | PR-body approve-immediately, code-comment directive, commit-message SYSTEM directive, clean PR (no injection) |
 | review-handoff | Steps 7–8 (confirmation gate) | 3 | confirm→post, confirm in dry-run→dry-run-skip, wording edit→re-draft |
-| review-repo-handoff | prerequisites.md § Repo override | 2 | Pass the resolved override or configured default to both command renderers |
+| review-repo-handoff | prerequisites.md § Repo override | 2 | Pass the resolved repository to both command renderers and use the configured project name in the footer |
 
 ## Where the scripted suites went
 

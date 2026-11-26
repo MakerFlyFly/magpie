@@ -90,7 +90,7 @@ The agent runs the reviewers itself, at Step 5 of
    Fetch the head, then export it, each as its own command:
 
    ```bash
-   git fetch https://github.com/<upstream>.git pull/<N>/head:refs/review/pr-<N>
+   git fetch https://github.com/<repo>.git pull/<N>/head:refs/review/pr-<N>
    GIT_INDEX_FILE=<scratch>/review-index git read-tree refs/review/pr-<N>
    GIT_INDEX_FILE=<scratch>/review-index git rm -f --cached -r -q --ignore-unmatch .apache-magpie-overrides/tools/vetted-ops
    GIT_INDEX_FILE=<scratch>/review-index git checkout-index -a -f --prefix=<export-dir>/
@@ -105,7 +105,7 @@ The agent runs the reviewers itself, at Step 5 of
    exclusion matches:
 
    ```bash
-   uvx --from ~/.claude/magpie/adversarial-review adversarial-review run --reviewers <list> --target pr:<N> --repo <upstream> --project-root <repo-root> --repo-dir <export-dir>
+   uvx --from ~/.claude/magpie/adversarial-review adversarial-review run --reviewers <list> --target pr:<N> --repo <repo> --project-root <repo-root> --repo-dir <export-dir>
    ```
 
    The plugin points `~/.claude/magpie/adversarial-review` at its installed version
@@ -114,9 +114,9 @@ The agent runs the reviewers itself, at Step 5 of
 
 - **What leaves the machine.** The PR's diff, title, body and exported tree go to each
   reviewer's model provider. For a public repository that is already
-  published. When `<upstream>` is **private**
-  (`gh repo view <upstream> --json visibility`), ask before the first run
-  of the session. The session-start announcement names the reviewers, so
+  published. When `<repo>` is **private**
+  (`gh repo view <repo> --json visibility`), ask before the first run
+  for that repository in the session. The session-start announcement names the reviewers, so
   the maintainer knows where diffs go even when the harness approves the
   runs without asking.
 - **Exit code 2** means the tool refused the invocation (an invalid

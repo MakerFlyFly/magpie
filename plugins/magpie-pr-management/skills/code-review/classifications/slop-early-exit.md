@@ -14,7 +14,7 @@ H1, H5 and S2 come back under `needs_judgement`: confirm or reject each from the
 
 ```text
 ⚠  Slop detection fired for PR #<N> — <title>
-   https://github.com/<upstream>/pull/<N>
+   https://github.com/<repo>/pull/<N>
 
 Hard signals:
   [H1] New unrecognised top-level directory: `team_project/`

@@ -37,6 +37,7 @@ def check(name: str, conclusion: str = "SUCCESS") -> dict[str, Any]:
 def node(
     number: int = 1,
     *,
+    repo: str = "acme/product",
     title: str = "Fix a thing",
     author: str = "nina",
     assoc: str = "CONTRIBUTOR",
@@ -74,7 +75,7 @@ def node(
         "id": f"PR_{number}",
         "number": number,
         "title": title,
-        "url": f"https://github.com/acme/product/pull/{number}",
+        "url": f"https://github.com/{repo}/pull/{number}",
         "isDraft": draft,
         "createdAt": ago(days=10),
         "updatedAt": updated or ago(days=1),

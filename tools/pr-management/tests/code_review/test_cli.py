@@ -31,6 +31,21 @@ from pr_management import cli
 
 from .builders import NOW, node, review, thread
 
+REVIEW_REPOS = [
+    pytest.param("acme/product", None, id="configured-repo"),
+    pytest.param("acme/product-site", "acme/product-site", id="override"),
+    pytest.param("Acme/Product-Site", "acme/product-site", id="different-case"),
+]
+INVALID_REPOS = [
+    "",
+    "acme-product",
+    "acme/product/extra",
+    "acme/..",
+    "acme/.",
+    "../product",
+    "acme/product\n",
+]
+
 DIFF = """diff --git a/scheduler/job.py b/scheduler/job.py
 --- a/scheduler/job.py
 +++ b/scheduler/job.py
@@ -63,6 +78,10 @@ def project(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def saved(tmp_path: Path) -> Path:
+    return _saved_reads(tmp_path, "acme/product")
+
+
+def _saved_reads(tmp_path: Path, repo: str) -> Path:
     path = tmp_path / "saved"
     path.mkdir()
     page = {
@@ -70,8 +89,8 @@ def saved(tmp_path: Path) -> Path:
             "repository": {
                 "pullRequests": {
                     "nodes": [
-                        node(7, requested=["alice"], files=["scheduler/job.py"]),
-                        node(8, files=["docs/x.md"]),
+                        node(7, repo=repo, requested=["alice"], files=["scheduler/job.py"]),
+                        node(8, repo=repo, files=["docs/x.md"]),
                     ]
                 }
             }
@@ -86,7 +105,9 @@ def saved(tmp_path: Path) -> Path:
     real_runs = json.dumps({"check_runs": [{"name": "Tests", "conclusion": "SUCCESS"}]})
     for head in ("abc1234def", "0123456789abcdef0123456789abcdef01234567"):
         (path / f"check-runs-{head}.json").write_text(real_runs)
-    full = node(7, requested=["alice"], files=["scheduler/job.py"], reviews=[review("bob", "COMMENTED")])
+    full = node(
+        7, repo=repo, requested=["alice"], files=["scheduler/job.py"], reviews=[review("bob", "COMMENTED")]
+    )
     (path / "cr-pr-7.json").write_text(
         json.dumps(
             {
@@ -144,16 +165,17 @@ def test_queue_asks_for_missing_reads(capsys: pytest.CaptureFixture[str], projec
     assert ops == {"team-members", "cr-viewer-commits"}
 
 
-@pytest.mark.parametrize("repo_override", [None, "acme/product-site"], ids=["configured-repo", "override"])
+@pytest.mark.parametrize(("saved_repo", "repo_override"), REVIEW_REPOS)
 @pytest.mark.parametrize("inline", ["on", "off"])
 def test_context_then_disposition_then_render(
     capsys: pytest.CaptureFixture[str],
     project: Path,
-    saved: Path,
     tmp_path: Path,
+    saved_repo: str,
     repo_override: str | None,
     inline: str,
 ) -> None:
+    saved = _saved_reads(tmp_path, saved_repo)
     repo_args = []
     if repo_override is not None:
         resolved = _run(
@@ -769,10 +791,15 @@ def test_session_records_fixup_as_a_review(
     assert "Reviewed: 2  (APPROVE 1, REQUEST_CHANGES 0, COMMENT 0, FIXUP 1)" in out["text"]
 
 
-@pytest.mark.parametrize("repo_override", [None, "acme/product-site"], ids=["configured-repo", "override"])
+@pytest.mark.parametrize(("saved_repo", "repo_override"), REVIEW_REPOS)
 def test_slop_comment_builds_quoted_commands(
-    capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path, repo_override: str | None
+    capsys: pytest.CaptureFixture[str],
+    project: Path,
+    tmp_path: Path,
+    saved_repo: str,
+    repo_override: str | None,
 ) -> None:
+    saved = _saved_reads(tmp_path, saved_repo)
     issues = tmp_path / "issues.txt"
     issues.write_text("The `team_project/` directory looks like a class project.\n")
     repo_args = ["--repo", repo_override] if repo_override is not None else []
@@ -782,6 +809,8 @@ def test_slop_comment_builds_quoted_commands(
         str(project),
         "code-review",
         "slop-comment",
+        "--saved-dir",
+        str(saved),
         "--pr",
         "7",
         "--issues",
@@ -799,7 +828,8 @@ def test_slop_comment_builds_quoted_commands(
         ["gh", "api", "--method", "PUT", f"repos/{repo}/issues/7/lock", "--field", "lock_reason=off-topic"],
     ]
     assert f"https://github.com/{repo}/pull/7" in out["report_hint"]
-    assert "Apache Product" in Path(out["body_file"]).read_text()
+    body = Path(out["body_file"]).read_text()
+    assert "Apache Product" in body and "https://example.org/contrib" in body
 
 
 @pytest.mark.parametrize(
@@ -822,7 +852,7 @@ def test_slop_comment_builds_quoted_commands(
         pytest.param(("slop-comment", "--issues", "unused"), id="slop-comment"),
     ],
 )
-@pytest.mark.parametrize("repo", ["", "acme-product", "acme/product/extra", "acme/.."])
+@pytest.mark.parametrize("repo", INVALID_REPOS)
 def test_code_review_rejects_an_invalid_target_before_rendering(
     capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path, subcommand: tuple[str, ...], repo: str
 ) -> None:
@@ -834,6 +864,113 @@ def test_code_review_rejects_an_invalid_target_before_rendering(
         ])  # fmt: skip
     assert capsys.readouterr().out == ""
     assert not out_dir.exists()
+
+
+@pytest.mark.parametrize("repo", INVALID_REPOS)
+def test_resolve_and_queue_return_a_json_error_for_an_invalid_repo(
+    capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path, repo: str
+) -> None:
+    args = ["--config-dir", str(project), "code-review"]
+    selector = f"repo:{repo}"
+    resolved = _run(capsys, *args, "resolve", selector)
+    queued = _run(capsys, *args, "queue", "--saved-dir", str(tmp_path), "--viewer", "alice", selector)
+    assert resolved == queued and set(resolved) == {"error"}
+
+
+def _renderer_args(command: str, saved: Path, out_dir: Path) -> list[str]:
+    args = [command, "--saved-dir", str(saved), "--pr", "7", "--out-dir", str(out_dir)]
+    text = saved.parent / "note.txt"
+    text.write_text("Check the naming.")
+    if command == "slop-comment":
+        return [*args, "--issues", str(text)]
+    findings = saved.parent / "findings.json"
+    findings.write_text("[]")
+    return [*args, "--findings", str(findings), "--summary", str(text), "--disposition", "COMMENT"]
+
+
+@pytest.mark.parametrize("command", ["render", "slop-comment"])
+@pytest.mark.parametrize(
+    ("repo_override", "identity"),
+    [
+        pytest.param(
+            "acme/product-site",
+            {"number": 7, "url": "https://github.com/acme/product/pull/7"},
+            id="wrong-override-repo",
+        ),
+        pytest.param(
+            None, {"number": 7, "url": "https://github.com/acme/product-site/pull/7"}, id="wrong-default-repo"
+        ),
+        pytest.param(None, {"number": 8, "url": "https://github.com/acme/product/pull/8"}, id="other-pr"),
+        pytest.param(None, {"number": 8, "url": "https://github.com/acme/product/pull/7"}, id="wrong-number"),
+        pytest.param(
+            None, {"number": 7, "url": "https://github.com/acme/product/pull/8"}, id="wrong-url-number"
+        ),
+        pytest.param(None, {"number": 7, "url": "https://example.org/acme/product/pull/7"}, id="wrong-host"),
+        pytest.param(
+            None, {"number": 7, "url": "https://github.com/acme/product/pull/7/files"}, id="files-tab-url"
+        ),
+        pytest.param(None, {"url": "https://github.com/acme/product/pull/7"}, id="missing-number"),
+        pytest.param(None, {"number": 7}, id="missing-url"),
+    ],
+)
+def test_command_renderer_checks_the_saved_pr_before_writing(
+    capsys: pytest.CaptureFixture[str],
+    project: Path,
+    saved: Path,
+    tmp_path: Path,
+    command: str,
+    repo_override: str | None,
+    identity: dict[str, object],
+) -> None:
+    path = saved / "cr-pr-7.json"
+    record = json.loads(path.read_text())
+    pr = record["data"]["repository"]["pullRequest"]
+    del pr["url"], pr["number"]
+    pr.update(identity)
+    path.write_text(json.dumps(record))
+
+    out_dir = tmp_path / "out"
+    args = ["--config-dir", str(project), "code-review", *_renderer_args(command, saved, out_dir)]
+    if repo_override:
+        args.extend(["--repo", repo_override])
+    expected_url = f"https://github.com/{repo_override or 'acme/product'}/pull/7"
+    for previous_files in (
+        {},
+        {"review-body-7.md": "body", "review-payload-7.json": "{}", "slop-warning-7.md": "warning"},
+    ):
+        if previous_files:
+            out_dir.mkdir()
+            for name, contents in previous_files.items():
+                (out_dir / name).write_text(contents)
+        with pytest.raises(SystemExit) as error:
+            cli.main(args)
+        assert expected_url in str(error.value) and "gql-cr-pr" in str(error.value)
+        assert capsys.readouterr().out == ""
+        assert out_dir.exists() == bool(previous_files)
+        assert {file.name: file.read_text() for file in out_dir.glob("*")} == previous_files
+
+
+@pytest.mark.parametrize("command", ["render", "slop-comment"])
+def test_command_renderer_requires_an_explicit_repo_without_upstream(
+    capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path, command: str
+) -> None:
+    (project / "project.md").write_text("| Key | Value |\n|---|---|\n")
+    saved = _saved_reads(tmp_path, "acme/product-site")
+    out_dir = tmp_path / "out"
+    args = [
+        "--project-root",
+        str(tmp_path),
+        "--config-dir",
+        str(project),
+        "code-review",
+        *_renderer_args(command, saved, out_dir),
+    ]
+    with pytest.raises(SystemExit, match="expected owner/name"):
+        cli.main(args)
+    assert capsys.readouterr().out == "" and not out_dir.exists()
+    out = _run(capsys, *args, "--repo", "acme/product-site")
+    field = "post_command" if command == "render" else "comment_command"
+    assert "acme/product-site" in out[field]
 
 
 def _slop_body(capsys: pytest.CaptureFixture[str], project: Path, tmp_path: Path, *extra: str) -> str:
@@ -1051,16 +1188,23 @@ def _render_approve(
     )
 
 
-@pytest.mark.parametrize("repo_override", [None, "acme/product-site"], ids=["configured-repo", "override"])
+@pytest.mark.parametrize(("saved_repo", "repo_override"), REVIEW_REPOS)
 def test_auto_merge_becomes_the_default_and_render_emits_its_command(
-    capsys: pytest.CaptureFixture[str], project: Path, saved: Path, tmp_path: Path, repo_override: str | None
+    capsys: pytest.CaptureFixture[str],
+    project: Path,
+    tmp_path: Path,
+    saved_repo: str,
+    repo_override: str | None,
 ) -> None:
-    _with_auto_merge(saved, method="REBASE")
+    saved = _saved_reads(tmp_path, saved_repo)
+    _with_auto_merge(saved, method="REBASE", repo=saved_repo)
     dis = _disposition(capsys, project, saved)
     assert dis["default"] == "APPROVE+AUTO-MERGE"
     assert "classifications/disposition-auto-merge.md" in dis["docs"]
     repo_args = ["--repo", repo_override] if repo_override is not None else []
     out = _render_approve(capsys, project, saved, tmp_path, "--auto-merge", "--viewer", "alice", *repo_args)
+    payload = json.loads(Path(out["payload_file"]).read_text(encoding="utf-8"))
+    assert payload["commit_id"] == HEAD and "comments" not in payload
     assert shlex.split(out["auto_merge_command"]) == [
         "gh",
         "pr",

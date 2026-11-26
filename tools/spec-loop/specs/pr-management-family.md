@@ -118,6 +118,10 @@ same directory; the behaviour is unchanged.
   The skill passes its resolved target repository to `render` and `slop-comment`
   as `--repo`. Both commands default to `upstream_repo` and use the selected
   repository in every generated command and link to the PR.
+  The selector and renderers share the repository name validation. Before
+  writing, both renderers match any saved PR they use to the target by number
+  and canonical GitHub URL. The project configuration supplies the footer
+  identity, contribution link and real-CI rules.
   `code-review session record --outcome` accepts `FIXUP` beside the three
   review events and the `skipped` / `slop-comment` / `slop-close` /
   `dry-run` outcomes, and the session summary counts it as a review (#2056).

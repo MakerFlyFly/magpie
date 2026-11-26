@@ -269,7 +269,7 @@ uv run --project <framework>/tools/pr-management pr-management code-review <subc
 | `slop-comment` | the slop-warning body, the comment, close and lock commands, and the report link |
 | `session record`, `session summary` | the session counts and summary text |
 
-`render` and `slop-comment` accept `--repo <owner>/<name>` for all generated commands and links to the PR. Both default to `upstream_repo` from `project.md`.
+`render` and `slop-comment` accept `--repo <owner>/<name>` for all generated commands and links to the PR. Both default to `upstream_repo` from `project.md` and require an explicit target when that setting is missing. Before writing, they check the PR number and URL of any saved `gql-cr-pr` read they use. `slop-comment` also supports a standalone warning or a saved directory containing only `permission.txt`.
 
 When a saved read is missing, a subcommand returns `needs: [{op, params, save, why}]`; the skill runs each bare `vetted-op-read --save` and re-runs it.
 The agent keeps reading the diff, writing findings and judging severity.
