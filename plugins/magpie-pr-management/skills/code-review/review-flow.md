@@ -290,7 +290,8 @@ uv run --project <framework>/tools/pr-management pr-management code-review dispo
   [--unanswered-question] [--ci-diff-caused] [--head-pushable] [--addressed-thread <id>]...
 ```
 
-Pass `--unanswered-question` when an author question to the maintainers is open, `--ci-diff-caused` when you judged a CI failure is this diff's, and `--head-pushable` when `gh pr view <N> --json maintainerCanModify,isCrossRepository` shows the maintainer can push to the head (`maintainerCanModify`, or a branch in the base repository).
+Pass `--unanswered-question` when an author question to the maintainers is open, `--ci-diff-caused` when you judged a CI failure is this diff's, and `--head-pushable` for the configured upstream when `gh pr view <N> --repo <upstream> --json maintainerCanModify,isCrossRepository` shows the maintainer can push to the head (`maintainerCanModify`, or a branch in the base repository).
+If `upstream_repo` is unset or differs from `<repo>` ignoring case, omit `--head-pushable` and use `COMMENT` for otherwise fixable findings.
 Pass `--addressed-thread <id>` for each of `context`'s `outdated_threads` that the current code addresses ([`classifications/outdated-thread.md`](classifications/outdated-thread.md)). The result's `resolve_first` lists them: before the prompt, tell the maintainer to resolve each one to unblock the merge.
 Give each `minor` / `nit` finding whose fix is small and mechanical a `fixup` field: one line naming the exact change.
 The result's `docs` names the disposition and footer files to read. **Propose**:
@@ -348,7 +349,7 @@ Write the one-sentence summary line (never boilerplate) and run:
 
 ```bash
 uv run --project <framework>/tools/pr-management pr-management code-review render --saved-dir <workspace>/saved --pr <N> --findings <file> --summary <file> \
-  --disposition <DISP> --keep <answer> --reviewers <reviewers-output> --out-dir <scratch> \
+  --repo <repo> --disposition <DISP> --keep <answer> --reviewers <reviewers-output> --out-dir <scratch> \
   [--security-note <file>] [--inline off]
 ```
 

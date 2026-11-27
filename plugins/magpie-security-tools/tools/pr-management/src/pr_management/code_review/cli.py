@@ -654,9 +654,28 @@ def _reviewers(args: argparse.Namespace, cfg: config.Config) -> dict[str, Any]:
     return result
 
 
+def _command_repo(args: argparse.Namespace, cfg: config.Config) -> str:
+    repo: str | None = cfg.upstream_repo if args.repo is None else args.repo
+    if repo is None or not selectors.valid_repo(repo):
+        raise SystemExit(
+            "pr-management: invalid target repository (expected owner/name in --repo or upstream_repo)"
+        )
+    if not _PR.fullmatch(str(args.pr)):
+        raise SystemExit("pr-management: invalid PR number for a command")
+    return repo
+
+
+def _load_target_pr(path: Path, repo: str, number: int) -> data.PR:
+    try:
+        return data.load_pr(path, expected_target=(repo, number))
+    except ValueError as exc:
+        raise SystemExit(f"pr-management: {exc}") from exc
+
+
 def _render(args: argparse.Namespace, cfg: config.Config) -> dict[str, Any]:
+    repo = _command_repo(args, cfg)
     saved: Path = args.saved_dir
-    pr = data.load_pr(saved / f"cr-pr-{args.pr}.json")
+    pr = _load_target_pr(saved / f"cr-pr-{args.pr}.json", repo, args.pr)
     files = difflib.parse((saved / f"diff-{args.pr}.patch").read_text(encoding="utf-8", errors="replace"))
     findings, curated_path = _resolve_findings(args.findings, pr_number=args.pr)
     summary = Path(args.summary).read_text(encoding="utf-8").strip()
@@ -694,9 +713,6 @@ def _render(args: argparse.Namespace, cfg: config.Config) -> dict[str, Any]:
     body_file = args.out_dir / f"review-body-{args.pr}.md"
     body_file.write_text(text + "\n", encoding="utf-8")
     check = review_body.verify_footer(text, variant)
-    repo = cfg.upstream_repo or ""
-    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo) or not _PR.match(str(args.pr)):
-        raise SystemExit("pr-management: the upstream repo or PR number is not valid for a command")
     # Every review, with or without inline threads, goes through the REST endpoint: its path names
     # the repository, which the public-surface scrub needs to recognise the framework's own repo.
     payload_file = args.out_dir / f"review-payload-{args.pr}.json"
@@ -797,6 +813,9 @@ def _guard(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _slop_comment(args: argparse.Namespace, cfg: config.Config) -> dict[str, Any]:
+    repo = _command_repo(args, cfg)
+    pr_path = _file(args.saved_dir, f"cr-pr-{args.pr}.json") if args.saved_dir else None
+    pr = _load_target_pr(pr_path, repo, args.pr) if pr_path else None
     issues = [
         line.strip() for line in Path(args.issues).read_text(encoding="utf-8").splitlines() if line.strip()
     ]
@@ -804,8 +823,6 @@ def _slop_comment(args: argparse.Namespace, cfg: config.Config) -> dict[str, Any
     text = review_body.template("slop-warning").replace("<PROJECT>", project)
     text = text.replace("<issues>", "\n".join(i if i.startswith("- ") else f"- {i}" for i in issues))
     text = text.replace("<upstream_contributing_docs_url>", cfg.contributing_docs_url or "CONTRIBUTING.md")
-    pr_path = _file(args.saved_dir, f"cr-pr-{args.pr}.json") if args.saved_dir else None
-    pr = data.load_pr(pr_path) if pr_path else None
     text = text.replace(
         "<footer>",
         review_body.footer(
@@ -815,7 +832,6 @@ def _slop_comment(args: argparse.Namespace, cfg: config.Config) -> dict[str, Any
     args.out_dir.mkdir(parents=True, exist_ok=True)
     path = args.out_dir / f"slop-warning-{args.pr}.md"
     path.write_text(text, encoding="utf-8")
-    repo = cfg.upstream_repo or ""
     return {
         "body_file": str(path),
         "comment_command": shlex.join(
@@ -835,7 +851,7 @@ def _slop_comment(args: argparse.Namespace, cfg: config.Config) -> dict[str, Any
                 ]
             ),
         ],
-        "report_hint": f"Optional, only for genuine spam: {cfg.upstream_repo and f'https://github.com/{repo}/pull/{args.pr}'} "
+        "report_hint": f"Optional, only for genuine spam: https://github.com/{repo}/pull/{args.pr} "
         "→ … menu → Report content.",
         "preview": text.splitlines()[:30],
     }
@@ -903,6 +919,9 @@ def add_parsers(sub: Any) -> None:
     ren = commands.add_parser("render", help="Steps 7a-7b: the body, the inline threads, the post command")
     ren.add_argument("--saved-dir", type=Path, required=True)
     ren.add_argument("--pr", type=int, required=True)
+    ren.add_argument(
+        "--repo", metavar="OWNER/NAME", help="target repository (default: project.md upstream_repo)"
+    )
     ren.add_argument("--findings", required=True)
     ren.add_argument("--summary", required=True, help="a file holding the one-sentence summary line")
     ren.add_argument("--disposition", choices=("APPROVE", "REQUEST_CHANGES", "COMMENT"), required=True)
@@ -966,6 +985,9 @@ def add_parsers(sub: Any) -> None:
 
     slc = commands.add_parser("slop-comment", help="the [C] warning body and the [X] close commands")
     slc.add_argument("--pr", type=int, required=True)
+    slc.add_argument(
+        "--repo", metavar="OWNER/NAME", help="target repository (default: project.md upstream_repo)"
+    )
     slc.add_argument("--issues", required=True, help="one plain-English issue per line")
     slc.add_argument("--out-dir", type=Path, required=True)
     slc.add_argument("--permission", type=_permission_arg, default=None)

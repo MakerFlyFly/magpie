@@ -107,7 +107,7 @@ and includes:
     `Edit`, no `git` write commands);
   - invoke other Agents (no nested subagents);
   - **write a review body.** The parent composes the body with
-    `code-review render` from the subagent's findings and summary
+    `code-review render --repo <repo>` from the subagent's findings and summary
     line, so the footer and the handle escaping are never left to
     a subagent's paraphrase.
 
