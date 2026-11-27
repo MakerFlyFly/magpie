@@ -262,12 +262,19 @@ uv run --project <framework>/tools/pr-management pr-management code-review <subc
 | `deps` | the dependency-constraint ledger: `broken`, `compatible` or `unknown` |
 | `disposition` | `APPROVE` / `REQUEST_CHANGES` / `COMMENT`, the footer variant, any conflict note, and whether a `FIXUP` (commit the remaining small, mechanical findings to the PR head, then approve) is the default; `--head-pushable` says the maintainer can push there; each `--addressed-thread <id>` (an outdated thread the current code addresses) leaves the thread gate and is returned in `resolve_first` for the maintainer to resolve |
 | `reviewers` | ranked reviewer suggestions |
-| `render` | the review body file, the payload file, inline anchors (line, side, position) and the `shlex.join`-built post command |
+| `render` | the review body file, the payload file, inline anchors (line, side, position), the post and verification commands, and the optional auto-merge command |
 | `pick` | the parsed picker choice |
 | `mention-scan`, `verify-footer` | live `@`-mentions in a draft; whether the footer matches the template |
 | `guard` | the head-SHA recheck before posting |
-| `slop-comment` | the slop-warning body and its `gh pr comment` command |
+| `slop-comment` | the slop-warning body, the comment, close and lock commands, and the report link |
 | `session record`, `session summary` | the session counts and summary text |
+
+`render` and `slop-comment` accept `--repo <owner>/<name>` for all generated commands and links to the PR. Both default to `upstream_repo` from `project.md` and require an explicit target when that setting is missing.
+Before writing, each renderer checks that any saved PR it uses has the requested number and the canonical URL `https://github.com/<repo>/pull/<N>`. `slop-comment` also supports a standalone warning or a saved directory containing only `permission.txt`.
+
+Use a separate vetted-ops `workspace` for each target repository, because the patch, permission and liveness files under `<workspace>/saved` do not identify their source repository.
+This rendering flow supports only `github.com` PR URLs and expects `gh` to target that host.
+After a rename or transfer, use the current canonical `owner/name` for `--repo` or `upstream_repo` and refresh the saved reads with the matching repository policy.
 
 When a saved read is missing, a subcommand returns `needs: [{op, params, save, why}]`; the skill runs each bare `vetted-op-read --save` and re-runs it.
 The agent keeps reading the diff, writing findings and judging severity.

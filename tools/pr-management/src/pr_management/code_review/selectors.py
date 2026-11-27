@@ -129,6 +129,12 @@ def parse_pr_list(arg: str) -> list[int]:
     return numbers
 
 
+def valid_repo(repo: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo)) and all(
+        part not in (".", "..") for part in repo.split("/")
+    )
+
+
 def parse(args: list[str]) -> Selector:
     sel = Selector()
     only: list[str] = []
@@ -170,7 +176,7 @@ def parse(args: list[str]) -> Selector:
             sel.with_reviewers = [v for v in value.split(",") if v]
         elif key == "with-reviewer" and value:
             sel.with_reviewer = value
-        elif key == "repo" and re.match(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", value):
+        elif key == "repo" and valid_repo(value):
             sel.repo = value
         elif key == "lookahead" and value.isdigit():
             sel.lookahead = int(value)

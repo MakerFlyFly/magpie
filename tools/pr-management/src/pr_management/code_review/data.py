@@ -332,11 +332,26 @@ def load_open(path: Path) -> list[PR]:
     return list(seen.values())
 
 
-def load_pr(path: Path) -> PR:
-    """One PR from a saved `gql-cr-pr <N>` read."""
+def load_pr(path: Path, *, expected_target: tuple[str, int] | None = None) -> PR:
+    """Read a saved `gql-cr-pr`, checking its repository and number when a target is supplied."""
     data = json.loads(path.read_text(encoding="utf-8")).get("data") or {}
     repo = data.get("repository") or {}
-    pr = from_node(repo.get("pullRequest") or {})
+    node = repo.get("pullRequest") or {}
+    if expected_target is not None:
+        owner_repo, number = expected_target
+        expected_url = f"https://github.com/{owner_repo}/pull/{number}"
+        url = node.get("url")
+        if (
+            type(node.get("number")) is not int
+            or node["number"] != number
+            or not isinstance(url, str)
+            or not url.isascii()
+            or url.lower() != expected_url.lower()
+        ):
+            raise ValueError(
+                f"expected saved PR {expected_url}. Refresh gql-cr-pr {number} for {owner_repo}."
+            )
+    pr = from_node(node)
     pr.viewer = (data.get("viewer") or {}).get("login")
     pr.viewer_permission = repo.get("viewerPermission")
     pr.auto_merge_allowed = bool(repo.get("autoMergeAllowed"))

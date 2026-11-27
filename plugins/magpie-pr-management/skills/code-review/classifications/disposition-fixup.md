@@ -8,6 +8,7 @@ Every approval gate still holds: green real CI, no unresolved thread, no standin
 A `major` or `blocking` finding is never fixed up — it goes back to the author.
 
 Instead of asking the contributor for another round over small, mechanical points, the maintainer applies them and approves.
+For an alternate repository or an unset `upstream_repo`, skip `FIXUP`, omit `--head-pushable` and report otherwise fixable findings as `COMMENT`.
 
 1. **Check out the PR head** on a local branch.
    Fetch it in the sandbox, from the main checkout, over HTTPS: `git fetch https://github.com/<upstream>.git +pull/<N>/head:refs/remotes/<upstream_remote>/pr-<N>` (`git-fetch` fetches upstream branches only, and a fork's head is not one).

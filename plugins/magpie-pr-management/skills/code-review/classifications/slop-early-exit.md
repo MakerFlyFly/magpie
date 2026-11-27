@@ -14,7 +14,7 @@ H1, H5 and S2 come back under `needs_judgement`: confirm or reject each from the
 
 ```text
 ⚠  Slop detection fired for PR #<N> — <title>
-   https://github.com/<upstream>/pull/<N>
+   https://github.com/<repo>/pull/<N>
 
 Hard signals:
   [H1] New unrecognised top-level directory: `team_project/`
@@ -93,7 +93,7 @@ for a cherry-pick or to direct the author to split the PR correctly.
 
 ---
 
-The `[C]` body and the `[X]` commands come from `code-review slop-comment --saved-dir <workspace>/saved --pr <N> --issues <file> --out-dir <scratch>`: write one plain-English issue per fired signal to the issues file; the tool fills the template, the project name, the contributing link and the comment footer (picked from your role in the saved `permission.txt`), and prints the exact `gh` commands. Run each only after the maintainer confirms it.
+The `[C]` body and the `[X]` commands come from `code-review slop-comment --saved-dir <workspace>/saved --repo <repo> --pr <N> --issues <file> --out-dir <scratch>`. Write one plain-English issue per fired signal to the issues file. The tool fills the template, the project name, the contributing link and the comment footer (picked from your role in the saved `permission.txt`), and prints the exact `gh` commands. Run each only after the maintainer confirms it.
 
 ## In the session summary
 
