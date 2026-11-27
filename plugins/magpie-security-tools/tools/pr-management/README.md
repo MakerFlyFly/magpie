@@ -272,6 +272,10 @@ uv run --project <framework>/tools/pr-management pr-management code-review <subc
 `render` and `slop-comment` accept `--repo <owner>/<name>` for all generated commands and links to the PR. Both default to `upstream_repo` from `project.md` and require an explicit target when that setting is missing.
 Before writing, each renderer checks that any saved PR it uses has the requested number and the canonical URL `https://github.com/<repo>/pull/<N>`. `slop-comment` also supports a standalone warning or a saved directory containing only `permission.txt`.
 
+Use a separate vetted-ops `workspace` for each target repository, because the patch, permission and liveness files under `<workspace>/saved` do not identify their source repository.
+This rendering flow supports only `github.com` PR URLs and expects `gh` to target that host.
+After a rename or transfer, use the current canonical `owner/name` for `--repo` or `upstream_repo` and refresh the saved reads with the matching repository policy.
+
 When a saved read is missing, a subcommand returns `needs: [{op, params, save, why}]`; the skill runs each bare `vetted-op-read --save` and re-runs it.
 The agent keeps reading the diff, writing findings and judging severity.
 
